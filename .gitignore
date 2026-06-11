@@ -12,3 +12,7 @@ logs/
 .classpath
 .project
 bin/
+eclipse/
+gradle/
+gradlew
+gradlew.bat

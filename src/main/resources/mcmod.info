@@ -1,0 +1,15 @@
+[
+{
+  "modid": "radiomod",
+  "name": "RadioMod",
+  "description": "Play music from any URL right in Minecraft! Place a Radio block, enter a URL, and enjoy 3D positional audio.",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "url": "",
+  "authorList": ["Wenz"],
+  "credits": "",
+  "logoFile": "",
+  "screenshots": [],
+  "dependencies": []
+}
+]

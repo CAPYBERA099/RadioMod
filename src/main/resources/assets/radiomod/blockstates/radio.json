@@ -1,8 +1,8 @@
 {
     "variants": {
-        "facing=north": { "model": "radiomod:block/radio" },
-        "facing=south": { "model": "radiomod:block/radio", "y": 180 },
-        "facing=east":  { "model": "radiomod:block/radio", "y": 90 },
-        "facing=west":  { "model": "radiomod:block/radio", "y": 270 }
+        "facing=north": { "model": "radiomod:radio" },
+        "facing=south": { "model": "radiomod:radio", "y": 180 },
+        "facing=east":  { "model": "radiomod:radio", "y": 90 },
+        "facing=west":  { "model": "radiomod:radio", "y": 270 }
     }
 }

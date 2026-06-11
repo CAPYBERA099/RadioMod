@@ -1,12 +1,12 @@
 {
-    "parent": "minecraft:block/block",
+    "parent": "block/block",
     "textures": {
-        "front": "radiomod:block/radio_front",
-        "side": "radiomod:block/radio_side",
-        "top": "radiomod:block/radio_top",
-        "bottom": "radiomod:block/radio_bottom",
-        "antenna": "radiomod:block/radio_antenna",
-        "particle": "radiomod:block/radio_front"
+        "front": "radiomod:blocks/radio_front",
+        "side": "radiomod:blocks/radio_side",
+        "top": "radiomod:blocks/radio_top",
+        "bottom": "radiomod:blocks/radio_bottom",
+        "antenna": "radiomod:blocks/radio_antenna",
+        "particle": "radiomod:blocks/radio_front"
     },
     "elements": [
         {
@@ -55,8 +55,8 @@
                 "north": { "uv": [6, 6, 10, 10], "texture": "#antenna" },
                 "east":  { "uv": [6, 6, 8, 10],  "texture": "#antenna" },
                 "west":  { "uv": [6, 6, 8, 10],  "texture": "#antenna" },
-                "up":    { "uv": [6, 6, 10, 8],  "texture": "#antenna" },
-                "down":  { "uv": [6, 6, 10, 8],  "texture": "#antenna" }
+                "up":    { "uv": [6, 6, 10, 8],   "texture": "#antenna" },
+                "down":  { "uv": [6, 6, 10, 8],   "texture": "#antenna" }
             }
         },
         {
@@ -67,8 +67,8 @@
                 "north": { "uv": [6, 6, 10, 10], "texture": "#antenna" },
                 "east":  { "uv": [6, 6, 8, 10],  "texture": "#antenna" },
                 "west":  { "uv": [6, 6, 8, 10],  "texture": "#antenna" },
-                "up":    { "uv": [6, 6, 10, 8],  "texture": "#antenna" },
-                "down":  { "uv": [6, 6, 10, 8],  "texture": "#antenna" }
+                "up":    { "uv": [6, 6, 10, 8],   "texture": "#antenna" },
+                "down":  { "uv": [6, 6, 10, 8],   "texture": "#antenna" }
             }
         }
     ]

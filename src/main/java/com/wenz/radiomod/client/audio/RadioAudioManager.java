@@ -1,30 +1,26 @@
 package com.wenz.radiomod.client.audio;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.core.BlockPos;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import net.minecraft.util.math.BlockPos;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import javax.sound.sampled.*;
 import java.io.*;
 import java.net.*;
-import java.nio.ByteOrder;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javazoom.jl.decoder.*;
 
 /**
- * Client-side audio engine.
- *
- * Streams MP3/Icecast audio from a URL, decodes via JLayer,
- * and plays through javax.sound with distance-based volume.
- *
- * YouTube URLs are resolved via yt-dlp if installed.
+ * Client-side audio engine for 1.12.2.
+ * Streams MP3/Icecast audio, decodes via JLayer, plays through javax.sound
+ * with distance-based volume.
  */
 public class RadioAudioManager {
-    private static final Logger LOG = LoggerFactory.getLogger("RadioMod");
-    private static final Map<BlockPos, RadioSource> SOURCES = new ConcurrentHashMap<>();
+    private static final Logger LOG = LogManager.getLogger("RadioMod");
+    private static final Map<BlockPos, RadioSource> SOURCES = new ConcurrentHashMap<BlockPos, RadioSource>();
     private static final float MAX_DISTANCE = 48f;
 
     /* ======== public API ======== */
@@ -32,14 +28,19 @@ public class RadioAudioManager {
     public static void play(BlockPos pos, String url, float volume) {
         stop(pos);
 
-        RadioSource src = new RadioSource();
+        final RadioSource src = new RadioSource();
         src.pos = pos;
         src.baseVolume = volume;
         src.running = true;
 
         SOURCES.put(pos, src);
 
-        Thread t = new Thread(() -> stream(src, url), "RadioMod-" + pos.toShortString());
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                stream(src, url);
+            }
+        }, "RadioMod-" + pos.getX() + "," + pos.getY() + "," + pos.getZ());
         t.setDaemon(true);
         t.start();
         src.thread = t;
@@ -69,15 +70,15 @@ public class RadioAudioManager {
 
     /** Called every client tick — updates volume based on player distance. */
     public static void tick() {
-        Minecraft mc = Minecraft.getInstance();
+        Minecraft mc = Minecraft.getMinecraft();
         if (mc.player == null) return;
 
-        for (var entry : SOURCES.entrySet()) {
+        for (Map.Entry<BlockPos, RadioSource> entry : SOURCES.entrySet()) {
             RadioSource src = entry.getValue();
             if (!src.running) { SOURCES.remove(entry.getKey()); continue; }
             if (src.line == null) continue;
 
-            double dist = Math.sqrt(mc.player.blockPosition().distSqr(src.pos));
+            double dist = Math.sqrt(mc.player.getDistanceSq(src.pos));
             float gain = calcGain(dist, src.baseVolume);
             applyGain(src.line, gain);
         }
@@ -126,10 +127,9 @@ public class RadioAudioManager {
             while (src.running && !Thread.interrupted()) {
                 hdr = bitstream.readFrame();
                 if (hdr == null) {
-                    // For live streams this may mean a network hiccup — retry
                     Thread.sleep(200);
                     hdr = bitstream.readFrame();
-                    if (hdr == null) break; // truly ended
+                    if (hdr == null) break;
                 }
                 sb = (SampleBuffer) decoder.decodeFrame(hdr, bitstream);
                 writeFrame(line, sb);
@@ -153,12 +153,12 @@ public class RadioAudioManager {
     /* ======== helpers ======== */
 
     private static HttpURLConnection openConnection(String url) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URI(url).toURL().openConnection();
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setRequestProperty("User-Agent", "Mozilla/5.0 (RadioMod/1.0)");
         c.setRequestProperty("Accept", "*/*");
-        c.setRequestProperty("Icy-MetaData", "0"); // suppress icecast metadata
-        c.setConnectTimeout(10_000);
-        c.setReadTimeout(30_000);
+        c.setRequestProperty("Icy-MetaData", "0");
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(30000);
         c.setInstanceFollowRedirects(true);
         c.connect();
         return c;
@@ -189,7 +189,7 @@ public class RadioAudioManager {
             dB = Math.max(dB, vol.getMinimum());
             dB = Math.min(dB, vol.getMaximum());
             vol.setValue(dB);
-        } catch (IllegalArgumentException ignored) {} // control not available
+        } catch (IllegalArgumentException ignored) {}
     }
 
     /* ======== inner class ======== */
