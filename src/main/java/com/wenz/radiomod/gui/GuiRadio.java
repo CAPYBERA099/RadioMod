@@ -1,6 +1,7 @@
 package com.wenz.radiomod.gui;
 
 import com.wenz.radiomod.block.TileRadio;
+import com.wenz.radiomod.client.audio.FileUploader;
 import com.wenz.radiomod.client.audio.Mp3JuiceConverter;
 import com.wenz.radiomod.client.audio.Mp3JuiceSearch;
 import com.wenz.radiomod.client.audio.RadioAudioManager;
@@ -42,6 +43,7 @@ public class GuiRadio extends GuiContainer {
 
     private boolean searching = false;
     private boolean converting = false;
+    private boolean uploading = false;
     private String statusMessage = null;
     private String statusColor = "gray";
 
@@ -90,6 +92,7 @@ public class GuiRadio extends GuiContainer {
     private static final int BTN_MUTE    = 7;
     private static final int BTN_REPEAT  = 8;
     private static final int BTN_PAUSE   = 9;
+    private static final int BTN_UPLOAD  = 10;
 
     public GuiRadio(ContainerRadio container) {
         super(container);
@@ -161,8 +164,9 @@ public class GuiRadio extends GuiContainer {
             buttonList.add(new GuiButton(BTN_SEARCH, x + 10, y + 56, 105, 20, "\u26A1 Search"));
             buttonList.add(new GuiButton(BTN_STOP,   x + 125, y + 56, 105, 20, "\u23F9 Stop"));
         } else {
-            buttonList.add(new GuiButton(BTN_PLAY, x + 10, y + 56, 105, 20, "\u25B6 Play"));
-            buttonList.add(new GuiButton(BTN_STOP, x + 125, y + 56, 105, 20, "\u23F9 Stop"));
+            buttonList.add(new GuiButton(BTN_PLAY,   x + 10,  y + 56, 72, 20, "\u25B6 Play"));
+            buttonList.add(new GuiButton(BTN_UPLOAD,  x + 85,  y + 56, 72, 20, "\u2191 Upload"));
+            buttonList.add(new GuiButton(BTN_STOP,   x + 160, y + 56, 72, 20, "\u23F9 Stop"));
         }
 
         // Mute button
@@ -256,6 +260,10 @@ public class GuiRadio extends GuiContainer {
 
             case BTN_SEARCH:
                 doSearch();
+                break;
+
+            case BTN_UPLOAD:
+                doUpload();
                 break;
 
             case BTN_STOP:
@@ -375,6 +383,76 @@ public class GuiRadio extends GuiContainer {
                 }
             }
         }, "RadioMod-Convert").start();
+    }
+
+    /* ======== File upload ======== */
+
+    private void doUpload() {
+        if (uploading || converting) return;
+
+        uploading = true;
+        statusMessage = "Opening file picker...";
+        statusColor = "yellow";
+
+        final TileRadio tile = container.getTile();
+        final BlockPos pos = tile.getPos();
+        final float volume = tile.getVolume();
+        final boolean repeat = tile.isRepeat();
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String fileUrl = FileUploader.openAndUpload();
+
+                    if (fileUrl != null) {
+                        // Extract filename for track title
+                        String title = fileUrl;
+                        int lastSlash = fileUrl.lastIndexOf('/');
+                        if (lastSlash >= 0) title = fileUrl.substring(lastSlash + 1);
+                        // Remove the id prefix (e.g., "m1abc_song.mp3" → "song.mp3")
+                        int underscore = title.indexOf('_');
+                        if (underscore > 0) title = title.substring(underscore + 1);
+                        // URL-decode the title
+                        try { title = java.net.URLDecoder.decode(title, "UTF-8"); }
+                        catch (Exception ignored) {}
+                        final String trackTitle = title;
+
+                        statusMessage = "\u25B6 " + trackTitle;
+                        statusColor = "green";
+
+                        PacketHandler.INSTANCE.sendToServer(
+                                new PacketSetUrl(pos, fileUrl, true, volume, repeat, trackTitle));
+                        RadioAudioManager.play(pos, fileUrl, volume);
+
+                        mc.addScheduledTask(new Runnable() {
+                            @Override
+                            public void run() {
+                                inputField.setText(fileUrl);
+                                rebuildGui(null);
+                            }
+                        });
+                    } else {
+                        String err = FileUploader.lastError;
+                        if (err != null) {
+                            statusMessage = err;
+                            statusColor = "red";
+                        } else {
+                            statusMessage = null; // user cancelled — no error
+                        }
+                    }
+                } catch (Exception e) {
+                    statusMessage = "Upload error";
+                    statusColor = "red";
+                } finally {
+                    uploading = false;
+                    mc.addScheduledTask(new Runnable() {
+                        @Override
+                        public void run() { rebuildGui(null); }
+                    });
+                }
+            }
+        }, "RadioMod-Upload").start();
     }
 
     /* ======== Input handling ======== */
@@ -628,8 +706,18 @@ public class GuiRadio extends GuiContainer {
         BlockPos pos = tile.getPos();
 
         // Title bar
-        String title = searchMode ? "\u26A1 Radio \u2014 mp3juice.sc" : "\u266B Radio";
-        fontRenderer.drawString(title, 8, 6, TEXT_COL);
+        String title;
+        int titleCol = TEXT_COL;
+        if (uploading) {
+            String upMsg = FileUploader.status != null ? FileUploader.status : "Uploading...";
+            title = "\u2191 " + truncateRight(upMsg, xSize / 2);
+            titleCol = YELLOW;
+        } else if (searchMode) {
+            title = "\u26A1 Radio \u2014 mp3juice.sc";
+        } else {
+            title = "\u266B Radio";
+        }
+        fontRenderer.drawString(title, 8, 6, titleCol);
 
         boolean isOn = RadioAudioManager.isPlaying(pos) || RadioAudioManager.isPaused(pos);
         String status;
