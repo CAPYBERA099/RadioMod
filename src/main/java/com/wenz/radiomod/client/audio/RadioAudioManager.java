@@ -16,10 +16,8 @@ import javazoom.jl.decoder.*;
 /**
  * Client-side audio engine for 1.12.2.
  * Supports two playback paths:
- *   1. JLayer — for MP3 streams (internet radio, .mp3 files)
- *   2. FFmpeg pipe — for any other format (YouTube AAC/Opus, OGG, FLAC, etc.)
- *      Runs: ffmpeg -i URL -f s16le -ar 44100 -ac 2 pipe:1
- *      Reads raw PCM from stdout → SourceDataLine
+ *   1. JLayer — for MP3 streams (internet radio, .mp3 files, mp3juice downloads)
+ *   2. FFmpeg pipe — for any other format (AAC, Opus, OGG, FLAC, etc.)
  */
 public class RadioAudioManager {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
@@ -32,12 +30,20 @@ public class RadioAudioManager {
     /* ======== public API ======== */
 
     public static void play(BlockPos pos, String url, float volume) {
+        // If already playing the same URL, just update volume — don't restart
+        RadioSource existing = SOURCES.get(pos);
+        if (existing != null && existing.running && url.equals(existing.currentUrl)) {
+            existing.baseVolume = volume;
+            return;
+        }
+
         stop(pos);
 
         final RadioSource src = new RadioSource();
         src.pos = pos;
         src.baseVolume = volume;
         src.running = true;
+        src.currentUrl = url;
 
         SOURCES.put(pos, src);
 
@@ -72,6 +78,11 @@ public class RadioAudioManager {
         return s != null && s.running;
     }
 
+    public static String getCurrentUrl(BlockPos pos) {
+        RadioSource s = SOURCES.get(pos);
+        return s != null ? s.currentUrl : null;
+    }
+
     public static void setVolume(BlockPos pos, float vol) {
         RadioSource s = SOURCES.get(pos);
         if (s != null) s.baseVolume = Math.max(0, Math.min(1, vol));
@@ -96,33 +107,29 @@ public class RadioAudioManager {
     /* ======== streaming core ======== */
 
     private static void stream(RadioSource src, String rawUrl) {
-        // Resolve the URL
         StreamResolver.ResolveResult resolved = StreamResolver.resolve(rawUrl);
 
         if (resolved == null) {
             LOG.error("[RadioMod] Could not resolve: {}", rawUrl);
+            src.running = false;
             return;
         }
 
         LOG.info("[RadioMod] Resolved: {} (needsFfmpeg={})", resolved.url, resolved.needsFfmpeg);
 
         if (resolved.needsFfmpeg) {
-            // Non-MP3 audio (YouTube AAC, Opus, etc.) — use ffmpeg pipe
             if (isFfmpegAvailable()) {
                 streamFfmpeg(src, resolved.url, rawUrl);
             } else {
-                // No ffmpeg — try JLayer anyway (might work for some formats)
                 LOG.warn("[RadioMod] ffmpeg not found, trying JLayer for non-MP3...");
                 if (!streamJLayer(src, resolved.url, rawUrl)) {
-                    LOG.error("[RadioMod] Playback failed. Install ffmpeg for YouTube/non-MP3 audio:");
+                    LOG.error("[RadioMod] Playback failed. Install ffmpeg for non-MP3 audio:");
                     LOG.error("[RadioMod]   winget install ffmpeg");
-                    LOG.error("[RadioMod] After install, restart Minecraft.");
                 }
             }
         } else {
             // MP3 stream — use JLayer directly
             if (!streamJLayer(src, resolved.url, rawUrl)) {
-                // JLayer failed — try ffmpeg as fallback
                 if (isFfmpegAvailable()) {
                     LOG.info("[RadioMod] JLayer failed, trying ffmpeg...");
                     streamFfmpeg(src, resolved.url, rawUrl);
@@ -202,11 +209,6 @@ public class RadioAudioManager {
 
     /* ======== FFmpeg pipe path ======== */
 
-    /**
-     * Plays any audio format by piping through ffmpeg.
-     * Command: ffmpeg -i <url> -f s16le -ar 44100 -ac 2 -loglevel error pipe:1
-     * Outputs raw 16-bit signed little-endian PCM at 44100 Hz stereo.
-     */
     private static void streamFfmpeg(RadioSource src, String url, String displayUrl) {
         Process proc = null;
         try {
@@ -216,19 +218,18 @@ public class RadioAudioManager {
                 "-reconnect_streamed", "1",
                 "-reconnect_delay_max", "5",
                 "-i", url,
-                "-vn",                      // no video
-                "-f", "s16le",              // raw PCM output
-                "-acodec", "pcm_s16le",     // 16-bit signed LE
-                "-ar", "44100",             // 44.1 kHz
-                "-ac", "2",                 // stereo
+                "-vn",
+                "-f", "s16le",
+                "-acodec", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
                 "-loglevel", "error",
-                "pipe:1"                    // output to stdout
+                "pipe:1"
             );
             pb.redirectErrorStream(false);
             proc = pb.start();
             src.ffmpegProcess = proc;
 
-            // Read stderr in background for error logging
             final Process fProc = proc;
             Thread errThread = new Thread(new Runnable() {
                 @Override
@@ -247,19 +248,17 @@ public class RadioAudioManager {
             errThread.setDaemon(true);
             errThread.start();
 
-            // Set up audio output: 44100 Hz, 16-bit, stereo, signed, little-endian
             AudioFormat fmt = new AudioFormat(44100, 16, 2, true, false);
             SourceDataLine line = (SourceDataLine) AudioSystem.getLine(
                     new DataLine.Info(SourceDataLine.class, fmt));
-            line.open(fmt, 44100 * 2 * 2); // 1 second buffer
+            line.open(fmt, 44100 * 2 * 2);
             line.start();
             src.line = line;
 
             LOG.info("[RadioMod] Playing (ffmpeg) 44100Hz 2ch — {}", displayUrl);
 
-            // Read raw PCM from ffmpeg stdout and write to audio line
             InputStream in = new BufferedInputStream(proc.getInputStream(), 16384);
-            byte[] buf = new byte[8192]; // ~46ms of audio at 44100Hz stereo 16-bit
+            byte[] buf = new byte[8192];
             int read;
 
             while (src.running && (read = in.read(buf)) != -1) {
@@ -289,7 +288,6 @@ public class RadioAudioManager {
             ProcessBuilder pb = new ProcessBuilder("ffmpeg", "-version");
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            // Read output to prevent blocking
             InputStream is = p.getInputStream();
             byte[] buf = new byte[1024];
             while (is.read(buf) != -1) {}
@@ -303,8 +301,7 @@ public class RadioAudioManager {
         if (ffmpegAvailable) {
             LOG.info("[RadioMod] ffmpeg detected — all audio formats supported");
         } else {
-            LOG.warn("[RadioMod] ffmpeg not found — only MP3 streams available");
-            LOG.warn("[RadioMod] Install ffmpeg for YouTube support: winget install ffmpeg");
+            LOG.info("[RadioMod] ffmpeg not found — MP3 only (YouTube works via Mp3Juice converter)");
         }
         return ffmpegAvailable;
     }
@@ -313,7 +310,10 @@ public class RadioAudioManager {
 
     private static HttpURLConnection openConnection(String url) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setRequestProperty("User-Agent", "Mozilla/5.0 (RadioMod/1.0)");
+        c.setRequestProperty("User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+        c.setRequestProperty("Referer", "https://mp3juice.sc/");
         c.setRequestProperty("Accept", "*/*");
         c.setRequestProperty("Icy-MetaData", "0");
         c.setConnectTimeout(10000);
@@ -367,6 +367,7 @@ public class RadioAudioManager {
         BlockPos pos;
         volatile float baseVolume;
         volatile boolean running;
+        volatile String currentUrl;
         Thread thread;
         SourceDataLine line;
         Process ffmpegProcess;

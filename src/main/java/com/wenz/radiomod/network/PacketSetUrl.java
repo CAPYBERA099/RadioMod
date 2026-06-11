@@ -56,9 +56,8 @@ public class PacketSetUrl implements IMessage {
                 TileEntity te = world.getTileEntity(msg.pos);
                 if (te instanceof TileRadio) {
                     TileRadio radio = (TileRadio) te;
-                    radio.setStreamUrl(msg.url);
-                    radio.setPlaying(msg.playing);
-                    radio.setVolume(msg.volume);
+                    // setState does a single markDirtyAndSync which notifies ALL clients
+                    radio.setState(msg.url, msg.playing, msg.volume);
                 }
             });
             return null;

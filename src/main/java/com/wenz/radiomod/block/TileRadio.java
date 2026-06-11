@@ -4,6 +4,7 @@ import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.network.NetworkManager;
 import net.minecraft.network.play.server.SPacketUpdateTileEntity;
 import net.minecraft.tileentity.TileEntity;
+import net.minecraft.util.math.BlockPos;
 
 import javax.annotation.Nullable;
 
@@ -12,6 +13,17 @@ public class TileRadio extends TileEntity {
     private String streamUrl = "";
     private boolean playing = false;
     private float volume = 1.0f;
+
+    /**
+     * Client-side callback for audio sync.
+     * Set by ClientProxy. Called when tile state is synced from server.
+     */
+    public static IRadioSyncHandler syncHandler = null;
+
+    public interface IRadioSyncHandler {
+        void onSync(BlockPos pos, String url, boolean playing, float volume,
+                    boolean wasPlaying, String oldUrl);
+    }
 
     /* ---------- getters / setters ---------- */
 
@@ -31,7 +43,15 @@ public class TileRadio extends TileEntity {
 
     public void setVolume(float v) {
         this.volume = Math.max(0f, Math.min(1f, v));
-        markDirty();
+        markDirtyAndSync();
+    }
+
+    /** Set all fields and sync once. */
+    public void setState(String url, boolean playing, float volume) {
+        this.streamUrl = url != null ? url : "";
+        this.playing = playing;
+        this.volume = Math.max(0f, Math.min(1f, volume));
+        markDirtyAndSync();
     }
 
     private void markDirtyAndSync() {
@@ -75,6 +95,28 @@ public class TileRadio extends TileEntity {
 
     @Override
     public void onDataPacket(NetworkManager net, SPacketUpdateTileEntity pkt) {
+        // Save old state before reading new
+        boolean wasPlaying = this.playing;
+        String oldUrl = this.streamUrl;
+
         readFromNBT(pkt.getNbtCompound());
+
+        // Trigger client-side audio sync
+        if (world != null && world.isRemote && syncHandler != null) {
+            syncHandler.onSync(pos, streamUrl, playing, volume, wasPlaying, oldUrl);
+        }
+    }
+
+    @Override
+    public void handleUpdateTag(NBTTagCompound tag) {
+        boolean wasPlaying = this.playing;
+        String oldUrl = this.streamUrl;
+
+        readFromNBT(tag);
+
+        // Also sync on initial chunk load
+        if (world != null && world.isRemote && syncHandler != null) {
+            syncHandler.onSync(pos, streamUrl, playing, volume, wasPlaying, oldUrl);
+        }
     }
 }

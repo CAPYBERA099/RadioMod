@@ -13,13 +13,10 @@ import java.util.regex.*;
  *
  * Resolution chain:
  * 1. Direct audio URLs (.mp3, .ogg, etc.) — pass through
- * 2. YouTube — built-in extractor (no external tools), then yt-dlp fallback
+ * 2. YouTube — Mp3JuiceConverter (returns direct MP3, no ffmpeg needed!)
  * 3. HTTP probe — check Content-Type, detect audio/playlist/HTML
  * 4. yt-dlp — generic fallback for unknown sites
  * 5. HTML parsing — extract audio URLs from page source
- *
- * Returned URL may be MP3, AAC/M4A, Opus/WebM, or other format.
- * RadioAudioManager handles format detection and playback.
  */
 public class StreamResolver {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
@@ -57,12 +54,23 @@ public class StreamResolver {
             return new ResolveResult(url, nonMp3);
         }
 
-        // Step 2: YouTube — built-in extractor first
+        // Step 2: YouTube — use Mp3JuiceConverter (returns MP3, no ffmpeg!)
         if (isYouTube(url)) {
-            LOG.info("[RadioMod] YouTube detected, trying built-in extractor...");
+            LOG.info("[RadioMod] YouTube detected, converting to MP3...");
+            String videoId = extractYouTubeId(url);
+            if (videoId != null) {
+                String mp3Url = Mp3JuiceConverter.convert(videoId);
+                if (mp3Url != null) {
+                    LOG.info("[RadioMod] YouTube → MP3 conversion OK");
+                    return new ResolveResult(mp3Url, false); // MP3 — no ffmpeg needed!
+                }
+            }
+
+            // Fallback: try built-in YouTube extractor
+            LOG.info("[RadioMod] Mp3Juice failed, trying YouTube extractor...");
             String yt = YouTubeExtractor.extract(url);
             if (yt != null) {
-                return new ResolveResult(yt, true); // YouTube audio is AAC/Opus → needs ffmpeg
+                return new ResolveResult(yt, true); // YouTube native = AAC/Opus
             }
 
             // Fallback to yt-dlp
@@ -72,15 +80,13 @@ public class StreamResolver {
                 return new ResolveResult(ytdlp, true);
             }
 
-            LOG.error("[RadioMod] YouTube extraction failed.");
-            LOG.error("[RadioMod] Try installing yt-dlp: winget install yt-dlp");
+            LOG.error("[RadioMod] YouTube extraction failed for: {}", url);
             return null;
         }
 
         // Step 3: Probe URL for content type
         ProbeResult probe = probeUrl(url);
         if (probe == null) {
-            // Connection failed — try yt-dlp
             String yt = tryYtDlp(url);
             if (yt != null) return new ResolveResult(yt, true);
             return null;
@@ -102,7 +108,7 @@ public class StreamResolver {
             if (stream != null) return new ResolveResult(stream, false);
         }
 
-        // Step 4: HTML page — try yt-dlp first (supports 1000+ sites)
+        // Step 4: HTML page — try yt-dlp first
         LOG.info("[RadioMod] HTML page, trying yt-dlp...");
         String ytResult = tryYtDlp(url);
         if (ytResult != null) return new ResolveResult(ytResult, true);
@@ -118,8 +124,19 @@ public class StreamResolver {
         }
 
         LOG.error("[RadioMod] Could not extract audio from: {}", url);
-        LOG.error("[RadioMod] Supported: direct MP3/OGG links, internet radio, YouTube, M3U/PLS playlists");
-        LOG.error("[RadioMod] For more sites install yt-dlp: winget install yt-dlp");
+        return null;
+    }
+
+    /* ======== YouTube ID extraction ======== */
+
+    static String extractYouTubeId(String url) {
+        Matcher m = Pattern.compile(
+            "(?:youtube\\.com/watch[^\"]*[?&]v=|youtu\\.be/|youtube\\.com/embed/|" +
+            "youtube\\.com/shorts/|music\\.youtube\\.com/watch[^\"]*[?&]v=)" +
+            "([a-zA-Z0-9_-]{11})"
+        ).matcher(url);
+        if (m.find()) return m.group(1);
+        if (url.matches("^[a-zA-Z0-9_-]{11}$")) return url;
         return null;
     }
 
@@ -258,7 +275,6 @@ public class StreamResolver {
     /* ======== HTML extraction ======== */
 
     private static String extractFromHtml(String html, String pageUrl) {
-        // <audio>/<source> tags
         List<Pattern> patterns = new ArrayList<Pattern>();
         patterns.add(Pattern.compile("<audio[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE));
         patterns.add(Pattern.compile("<source[^>]+src\\s*=\\s*[\"']([^\"']+)[\"']", Pattern.CASE_INSENSITIVE));
@@ -274,17 +290,14 @@ public class StreamResolver {
             }
         }
 
-        // Direct audio URLs in page
         Matcher urlMatcher = Pattern.compile(
             "(https?://[^\"'\\s<>]+\\.(?:mp3|ogg|wav|aac|m4a|opus)(?:[?][^\"'\\s<>]*)?)",
             Pattern.CASE_INSENSITIVE
         ).matcher(html);
         if (urlMatcher.find()) {
-            LOG.info("[RadioMod] Found audio URL: {}", urlMatcher.group(1));
             return urlMatcher.group(1);
         }
 
-        // CDN patterns
         Matcher cdnMatcher = Pattern.compile(
             "(https?://(?:cdn|media|audio|stream|music)[^\"'\\s<>]+)",
             Pattern.CASE_INSENSITIVE
@@ -292,22 +305,17 @@ public class StreamResolver {
         while (cdnMatcher.find()) {
             String c = cdnMatcher.group(1);
             if (c.contains(".mp3") || c.contains("/audio/") || c.contains("/stream/")) {
-                LOG.info("[RadioMod] Found CDN audio: {}", c);
                 return c;
             }
         }
 
-        // data-* attributes
         Matcher dataMatcher = Pattern.compile(
             "data-(?:url|src|file|mp3|audio)\\s*=\\s*[\"']([^\"']+)[\"']",
             Pattern.CASE_INSENSITIVE
         ).matcher(html);
         while (dataMatcher.find()) {
             String src = dataMatcher.group(1);
-            if (src.startsWith("http")) {
-                LOG.info("[RadioMod] Found data attr audio: {}", src);
-                return src;
-            }
+            if (src.startsWith("http")) return src;
         }
 
         return null;
@@ -360,7 +368,6 @@ public class StreamResolver {
             String line = out.readLine();
             out.close();
 
-            // Drain stderr
             BufferedReader err = new BufferedReader(new InputStreamReader(proc.getErrorStream()));
             StringBuilder errBuf = new StringBuilder();
             String errLine;
@@ -375,7 +382,6 @@ public class StreamResolver {
 
             String errStr = errBuf.toString();
             if (errStr.contains("not recognized") || errStr.contains("No such file")) {
-                if (browser == null) LOG.debug("[RadioMod] yt-dlp not installed");
                 return null;
             }
 

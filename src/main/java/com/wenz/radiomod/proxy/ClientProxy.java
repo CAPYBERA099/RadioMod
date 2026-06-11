@@ -1,6 +1,8 @@
 package com.wenz.radiomod.proxy;
 
+import com.wenz.radiomod.block.TileRadio;
 import com.wenz.radiomod.client.audio.RadioAudioManager;
+import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -18,6 +20,27 @@ public class ClientProxy extends CommonProxy {
     public void init(FMLInitializationEvent event) {
         super.init(event);
         MinecraftForge.EVENT_BUS.register(this);
+
+        // Register client-side audio sync handler
+        // When server syncs TileRadio state to all clients, this starts/stops audio
+        TileRadio.syncHandler = new TileRadio.IRadioSyncHandler() {
+            @Override
+            public void onSync(BlockPos pos, String url, boolean playing, float volume,
+                               boolean wasPlaying, String oldUrl) {
+                if (playing && (!wasPlaying || !url.equals(oldUrl))) {
+                    // Start or restart playback
+                    if (!url.isEmpty()) {
+                        RadioAudioManager.play(pos, url, volume);
+                    }
+                } else if (!playing && wasPlaying) {
+                    // Stop playback
+                    RadioAudioManager.stop(pos);
+                } else if (playing) {
+                    // Just update volume
+                    RadioAudioManager.setVolume(pos, volume);
+                }
+            }
+        };
     }
 
     @SubscribeEvent

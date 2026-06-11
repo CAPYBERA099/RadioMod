@@ -19,6 +19,8 @@ import java.util.List;
  * Radio GUI with two modes:
  *   1. URL mode — paste a direct URL and play
  *   2. Search mode — search mp3juice.sc, browse results, click to play
+ *
+ * Features: volume slider, state saving, server sync for all players.
  */
 public class GuiRadio extends GuiContainer {
 
@@ -35,7 +37,13 @@ public class GuiRadio extends GuiContainer {
     private String searchError = null;
     private int selectedIndex = -1;
 
-    // Layout constants
+    // Volume slider
+    private boolean draggingVolume = false;
+    private static final int SLIDER_W = 120;
+    private static final int SLIDER_H = 10;
+    private static final int KNOB_W = 6;
+
+    // Layout
     private static final int RESULTS_VISIBLE = 5;
     private static final int RESULT_HEIGHT = 22;
 
@@ -52,22 +60,21 @@ public class GuiRadio extends GuiContainer {
     private static final int DUR_COL    = 0xFF888888;
     private static final int WHITE      = 0xFFFFFFFF;
     private static final int YELLOW     = 0xFFffd700;
+    private static final int SLIDER_BG  = 0xFF333355;
+    private static final int SLIDER_FG  = 0xFFe94560;
+    private static final int SLIDER_KNB = 0xFFFFFFFF;
 
     // Button IDs
     private static final int BTN_PLAY    = 1;
     private static final int BTN_STOP    = 2;
-    private static final int BTN_VOL_DN  = 3;
-    private static final int BTN_VOL_UP  = 4;
     private static final int BTN_MODE    = 5;
     private static final int BTN_SEARCH  = 6;
-    private static final int BTN_PREV    = 7;
-    private static final int BTN_NEXT    = 8;
 
     public GuiRadio(ContainerRadio container) {
         super(container);
         this.container = container;
         this.xSize = 260;
-        this.ySize = 120; // Will grow in search mode
+        this.ySize = 115;
     }
 
     @Override
@@ -83,9 +90,9 @@ public class GuiRadio extends GuiContainer {
 
         // Resize based on mode
         if (searchMode && !searchResults.isEmpty()) {
-            this.ySize = 120 + Math.min(searchResults.size(), RESULTS_VISIBLE) * RESULT_HEIGHT + 30;
+            this.ySize = 115 + Math.min(searchResults.size(), RESULTS_VISIBLE) * RESULT_HEIGHT + 28;
         } else {
-            this.ySize = 120;
+            this.ySize = 115;
         }
         // Recenter
         this.guiLeft = (this.width - this.xSize) / 2;
@@ -94,50 +101,61 @@ public class GuiRadio extends GuiContainer {
         y = guiTop;
 
         // Input field
-        String prevText = (inputField != null) ? inputField.getText() : "";
+        String prevText = (inputField != null) ? inputField.getText() : null;
         inputField = new GuiTextField(0, fontRenderer, x + 10, y + 30, 197, 18);
         inputField.setMaxStringLength(512);
 
-        if (prevText.isEmpty() && !searchMode) {
-            inputField.setText(container.getTile().getStreamUrl());
-        } else {
+        if (prevText != null) {
             inputField.setText(prevText);
+        } else if (!searchMode) {
+            inputField.setText(container.getTile().getStreamUrl());
         }
         inputField.setFocused(true);
 
         // Buttons
         buttonList.clear();
 
-        // Mode toggle (top right)
+        // Mode toggle (top right of text field)
         String modeLabel = searchMode ? "\u266B URL" : "\u26A1 Search";
         buttonList.add(new GuiButton(BTN_MODE, x + 210, y + 30, 40, 18, modeLabel));
 
         if (searchMode) {
-            // Search button
             buttonList.add(new GuiButton(BTN_SEARCH, x + 10, y + 56, 105, 20, "\u26A1 Search"));
             buttonList.add(new GuiButton(BTN_STOP,   x + 125, y + 56, 105, 20, "\u23F9 Stop"));
-
-            // Pagination (only if results exist)
-            if (searchResults.size() > RESULTS_VISIBLE) {
-                int listY = y + 82 + Math.min(searchResults.size(), RESULTS_VISIBLE) * RESULT_HEIGHT;
-                buttonList.add(new GuiButton(BTN_PREV, x + 10, listY, 40, 16, "\u25C0"));
-                buttonList.add(new GuiButton(BTN_NEXT, x + 55, listY, 40, 16, "\u25B6"));
-            }
         } else {
-            // URL mode buttons
             buttonList.add(new GuiButton(BTN_PLAY, x + 10, y + 56, 105, 20, "\u25B6 Play"));
             buttonList.add(new GuiButton(BTN_STOP, x + 125, y + 56, 105, 20, "\u23F9 Stop"));
         }
-
-        // Volume (always visible)
-        buttonList.add(new GuiButton(BTN_VOL_DN, x + 10,  y + 82, 50, 18, "Vol -"));
-        buttonList.add(new GuiButton(BTN_VOL_UP, x + 65,  y + 82, 50, 18, "Vol +"));
     }
+
+    /* ======== Volume slider geometry (relative to guiLeft/guiTop) ======== */
+
+    private int sliderX() { return 10; }
+    private int sliderY() { return 84; }
+
+    private float getSliderValue(int mouseX) {
+        int sx = guiLeft + sliderX();
+        float raw = (float)(mouseX - sx) / (float) SLIDER_W;
+        return Math.max(0f, Math.min(1f, raw));
+    }
+
+    /* ======== GUI close — save state ======== */
 
     @Override
     public void onGuiClosed() {
         super.onGuiClosed();
         Keyboard.enableRepeatEvents(false);
+
+        // Save current URL to tile entity even if not playing
+        TileRadio tile = container.getTile();
+        if (!searchMode) {
+            String currentText = inputField.getText().trim();
+            if (!currentText.isEmpty() && !currentText.equals(tile.getStreamUrl())) {
+                // Send to server to persist
+                PacketHandler.INSTANCE.sendToServer(
+                        new PacketSetUrl(tile.getPos(), currentText, tile.isPlaying(), tile.getVolume()));
+            }
+        }
     }
 
     @Override
@@ -160,8 +178,10 @@ public class GuiRadio extends GuiContainer {
             case BTN_PLAY: // Play URL
                 String url = inputField.getText().trim();
                 if (!url.isEmpty()) {
+                    // Send to server → server syncs to ALL clients → everyone plays
                     PacketHandler.INSTANCE.sendToServer(
                             new PacketSetUrl(tile.getPos(), url, true, tile.getVolume()));
+                    // Also play locally for instant feedback
                     RadioAudioManager.play(tile.getPos(), url, tile.getVolume());
                 }
                 break;
@@ -174,32 +194,6 @@ public class GuiRadio extends GuiContainer {
                 PacketHandler.INSTANCE.sendToServer(
                         new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), false, tile.getVolume()));
                 RadioAudioManager.stop(tile.getPos());
-                break;
-
-            case BTN_VOL_DN:
-                float vDown = Math.max(0f, tile.getVolume() - 0.1f);
-                tile.setVolume(vDown);
-                RadioAudioManager.setVolume(tile.getPos(), vDown);
-                PacketHandler.INSTANCE.sendToServer(
-                        new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), vDown));
-                break;
-
-            case BTN_VOL_UP:
-                float vUp = Math.min(1f, tile.getVolume() + 0.1f);
-                tile.setVolume(vUp);
-                RadioAudioManager.setVolume(tile.getPos(), vUp);
-                PacketHandler.INSTANCE.sendToServer(
-                        new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), vUp));
-                break;
-
-            case BTN_PREV:
-                scrollOffset = Math.max(0, scrollOffset - RESULTS_VISIBLE);
-                break;
-
-            case BTN_NEXT:
-                if (scrollOffset + RESULTS_VISIBLE < searchResults.size()) {
-                    scrollOffset += RESULTS_VISIBLE;
-                }
                 break;
         }
     }
@@ -215,7 +209,6 @@ public class GuiRadio extends GuiContainer {
         searchResults.clear();
         scrollOffset = 0;
 
-        // Run search in background thread
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -229,7 +222,6 @@ public class GuiRadio extends GuiContainer {
                     searchError = "Search error";
                 } finally {
                     searching = false;
-                    // Trigger GUI rebuild on next frame
                     mc.addScheduledTask(new Runnable() {
                         @Override
                         public void run() {
@@ -246,8 +238,10 @@ public class GuiRadio extends GuiContainer {
         TileRadio tile = container.getTile();
         String url = result.toYouTubeUrl();
 
+        // Send to server → syncs to all players
         PacketHandler.INSTANCE.sendToServer(
                 new PacketSetUrl(tile.getPos(), url, true, tile.getVolume()));
+        // Also play locally for instant feedback
         RadioAudioManager.play(tile.getPos(), url, tile.getVolume());
     }
 
@@ -260,12 +254,10 @@ public class GuiRadio extends GuiContainer {
                 mc.player.closeScreen();
                 return;
             }
-            // Enter key triggers search or play
             if (keyCode == Keyboard.KEY_RETURN) {
                 if (searchMode) {
                     doSearch();
                 } else {
-                    // Simulate play button
                     actionPerformed(new GuiButton(BTN_PLAY, 0, 0, 0, 0, ""));
                 }
                 return;
@@ -281,10 +273,19 @@ public class GuiRadio extends GuiContainer {
         super.mouseClicked(mouseX, mouseY, mouseButton);
         inputField.mouseClicked(mouseX, mouseY, mouseButton);
 
-        // Check if a search result was clicked
+        // Check volume slider click
+        int sx = guiLeft + sliderX();
+        int sy = guiTop + sliderY();
+        if (mouseX >= sx && mouseX <= sx + SLIDER_W && mouseY >= sy && mouseY <= sy + SLIDER_H) {
+            draggingVolume = true;
+            updateVolume(mouseX);
+            return;
+        }
+
+        // Check search result click
         if (searchMode && !searchResults.isEmpty()) {
             int listX = guiLeft + 10;
-            int listY = guiTop + 108;
+            int listY = guiTop + 105;
             int listW = xSize - 20;
 
             int visibleCount = Math.min(searchResults.size() - scrollOffset, RESULTS_VISIBLE);
@@ -301,6 +302,33 @@ public class GuiRadio extends GuiContainer {
                 }
             }
         }
+    }
+
+    @Override
+    protected void mouseClickMove(int mouseX, int mouseY, int clickedMouseButton, long timeSinceLastClick) {
+        super.mouseClickMove(mouseX, mouseY, clickedMouseButton, timeSinceLastClick);
+        if (draggingVolume) {
+            updateVolume(mouseX);
+        }
+    }
+
+    @Override
+    protected void mouseReleased(int mouseX, int mouseY, int state) {
+        super.mouseReleased(mouseX, mouseY, state);
+        if (draggingVolume) {
+            draggingVolume = false;
+            // Send final volume to server
+            TileRadio tile = container.getTile();
+            PacketHandler.INSTANCE.sendToServer(
+                    new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), tile.getVolume()));
+        }
+    }
+
+    private void updateVolume(int mouseX) {
+        float vol = getSliderValue(mouseX);
+        TileRadio tile = container.getTile();
+        tile.setVolume(vol);
+        RadioAudioManager.setVolume(tile.getPos(), vol);
     }
 
     @Override
@@ -336,13 +364,30 @@ public class GuiRadio extends GuiContainer {
         // Title bar
         drawRect(x + 1, y + 1, x + w - 1, y + 20, TITLE_BG);
 
+        // Volume slider
+        int sx = x + sliderX();
+        int sy = y + sliderY();
+        TileRadio tile = container.getTile();
+        float vol = tile.getVolume();
+
+        // Slider track
+        drawRect(sx, sy, sx + SLIDER_W, sy + SLIDER_H, SLIDER_BG);
+        // Filled portion
+        int fillW = (int)(vol * SLIDER_W);
+        drawRect(sx, sy, sx + fillW, sy + SLIDER_H, SLIDER_FG);
+        // Knob
+        int knobX = sx + fillW - KNOB_W / 2;
+        drawRect(knobX, sy - 1, knobX + KNOB_W, sy + SLIDER_H + 1, SLIDER_KNB);
+        // Slider border
+        drawRect(sx, sy, sx + SLIDER_W, sy + 1, 0xFF555577);
+        drawRect(sx, sy + SLIDER_H - 1, sx + SLIDER_W, sy + SLIDER_H, 0xFF555577);
+
         // Draw search results
         if (searchMode && !searchResults.isEmpty()) {
             int listX = x + 10;
-            int listY = y + 108;
+            int listY = y + 105;
             int listW = w - 20;
 
-            // Results background
             int visibleCount = Math.min(searchResults.size() - scrollOffset, RESULTS_VISIBLE);
             drawRect(listX - 2, listY - 2,
                     listX + listW + 2, listY + visibleCount * RESULT_HEIGHT + 2,
@@ -352,7 +397,6 @@ public class GuiRadio extends GuiContainer {
                 int idx = scrollOffset + i;
                 int itemY = listY + i * RESULT_HEIGHT;
 
-                // Background
                 boolean hovered = mouseX >= listX && mouseX <= listX + listW
                         && mouseY >= itemY && mouseY <= itemY + RESULT_HEIGHT - 2;
                 boolean selected = idx == selectedIndex;
@@ -360,7 +404,6 @@ public class GuiRadio extends GuiContainer {
                 int bg = selected ? RESULT_SEL : (hovered ? RESULT_HOV : RESULT_BG);
                 drawRect(listX, itemY, listX + listW, itemY + RESULT_HEIGHT - 2, bg);
 
-                // Left accent bar for selected
                 if (selected) {
                     drawRect(listX, itemY, listX + 2, itemY + RESULT_HEIGHT - 2, GREEN);
                 }
@@ -381,33 +424,29 @@ public class GuiRadio extends GuiContainer {
         int statusColor = isOn ? GREEN : GRAY;
         fontRenderer.drawString(status, xSize - fontRenderer.getStringWidth(status) - 8, 6, statusColor);
 
-        // Volume
+        // Volume label
         int pct = Math.round(tile.getVolume() * 100);
-        fontRenderer.drawString("Vol: " + pct + "%", 125, 87, 0xCCCCCC);
+        fontRenderer.drawString("Vol: " + pct + "%", sliderX() + SLIDER_W + 8, sliderY() + 1, 0xCCCCCC);
 
         // Search mode extras
         if (searchMode) {
             if (searching) {
-                fontRenderer.drawString("Searching...", 10, 97, YELLOW);
+                fontRenderer.drawString("Searching...", 10, 95, YELLOW);
             } else if (searchError != null) {
-                fontRenderer.drawString(searchError, 10, 97, BORDER);
+                fontRenderer.drawString(searchError, 10, 95, BORDER);
             } else if (!searchResults.isEmpty()) {
-                // Result count
                 String info = (scrollOffset + 1) + "-"
                         + Math.min(scrollOffset + RESULTS_VISIBLE, searchResults.size())
                         + " / " + searchResults.size();
-                fontRenderer.drawString(info, 10, 97, GRAY);
+                fontRenderer.drawString(info, 10, 95, GRAY);
+                fontRenderer.drawString("Click to play", xSize - fontRenderer.getStringWidth("Click to play") - 10, 95, GRAY);
 
-                // Hint
-                fontRenderer.drawString("Click to play", xSize - fontRenderer.getStringWidth("Click to play") - 10, 97, GRAY);
-
-                // Draw result texts
                 int visibleCount = Math.min(searchResults.size() - scrollOffset, RESULTS_VISIBLE);
                 for (int i = 0; i < visibleCount; i++) {
                     int idx = scrollOffset + i;
                     Mp3JuiceSearch.SearchResult r = searchResults.get(idx);
 
-                    int itemY = 108 + i * RESULT_HEIGHT;
+                    int itemY = 105 + i * RESULT_HEIGHT;
                     boolean selected = idx == selectedIndex;
 
                     // Truncate title to fit
@@ -420,11 +459,8 @@ public class GuiRadio extends GuiContainer {
                         titleText += "...";
                     }
 
-                    // Title
                     fontRenderer.drawString(titleText, 15, itemY + 3, selected ? GREEN : WHITE);
-                    // Duration
                     fontRenderer.drawString(r.duration, xSize - fontRenderer.getStringWidth(r.duration) - 15, itemY + 3, DUR_COL);
-                    // Source icon
                     fontRenderer.drawString(r.source.equals("yt") ? "\u25B6" : "\u266A",
                             xSize - fontRenderer.getStringWidth(r.duration) - 25, itemY + 3,
                             r.source.equals("yt") ? 0xFFFF0000 : 0xFFFF5500);
