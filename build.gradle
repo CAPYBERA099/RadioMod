@@ -4,23 +4,34 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath 'net.minecraftforge.gradle:ForgeGradle:2.3-SNAPSHOT'
+        classpath 'net.minecraftforge.gradle:ForgeGradle:3.+'
     }
 }
 
-apply plugin: 'net.minecraftforge.gradle.forge'
-apply plugin: 'java'
+apply plugin: 'net.minecraftforge.gradle'
+apply plugin: 'eclipse'
 
 version = '1.0.0'
 group = 'com.wenz.radiomod'
 archivesBaseName = 'RadioMod'
 
-sourceCompatibility = targetCompatibility = '1.8'
+sourceCompatibility = targetCompatibility = compileJava.sourceCompatibility = compileJava.targetCompatibility = '1.8'
 
 minecraft {
-    version = "1.12.2-14.23.5.2860"
-    runDir = "run"
-    mappings = "snapshot_20171003"
+    mappings channel: 'snapshot', version: '20171003-1.12'
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.markers', 'SCAN,REGISTRIES,REGISTRYDUMP'
+            property 'forge.logging.console.level', 'debug'
+        }
+
+        server {
+            property 'forge.logging.markers', 'SCAN,REGISTRIES,REGISTRYDUMP'
+            property 'forge.logging.console.level', 'debug'
+        }
+    }
 }
 
 repositories {
@@ -28,35 +39,30 @@ repositories {
 }
 
 dependencies {
-    compile 'javazoom:jlayer:1.0.1'
+    minecraft 'net.minecraftforge:forge:1.12.2-14.23.5.2860'
+
+    // JLayer for MP3 decoding
+    implementation 'javazoom:jlayer:1.0.1'
 }
 
+// Bundle JLayer into the mod jar
 jar {
     manifest {
         attributes([
-            'Specification-Title'     : 'RadioMod',
-            'Specification-Version'   : '1',
-            'Implementation-Title'    : project.name,
-            'Implementation-Version'  : project.version,
-            'Implementation-Vendor'   : 'Wenz',
+            "Specification-Title": "radiomod",
+            "Specification-Vendor": "Wenz",
+            "Specification-Version": "1",
+            "Implementation-Title": project.name,
+            "Implementation-Version": "${version}",
+            "Implementation-Vendor": "Wenz",
+            "Implementation-Timestamp": new Date().format("yyyy-MM-dd'T'HH:mm:ssZ")
         ])
     }
-    // Bundle JLayer into the mod jar
+
+    // Bundle JLayer classes into the mod jar (fat jar)
     from {
-        configurations.compile.collect { it.isDirectory() ? it : zipTree(it) }
-    }
-    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-}
-
-processResources {
-    inputs.property "version", project.version
-    inputs.property "mcversion", project.minecraft.version
-
-    from(sourceSets.main.resources.srcDirs) {
-        include 'mcmod.info'
-        expand 'version': project.version, 'mcversion': project.minecraft.version
-    }
-    from(sourceSets.main.resources.srcDirs) {
-        exclude 'mcmod.info'
+        configurations.runtimeClasspath.findAll { it.name.contains('jlayer') }.collect { zipTree(it) }
     }
 }
+
+jar.finalizedBy('reobfJar')
