@@ -212,13 +212,22 @@ public class RadioAudioManager {
             LOG.info("[RadioMod] ♫ Playing (proxy) 44100Hz stereo — {}", displayUrl);
 
             InputStream in = new BufferedInputStream(httpResp.getEntity().getContent(), 65536);
-            byte[] buf = new byte[8192];
+            byte[] buf = new byte[8192]; // 8192 is divisible by 4 (frameSize)
             int read;
             long totalBytes = 0;
+            int remainder = 0; // leftover bytes from non-aligned reads
 
-            while (src.running && !Thread.interrupted() && (read = in.read(buf)) != -1) {
-                line.write(buf, 0, read);
-                totalBytes += read;
+            while (src.running && !Thread.interrupted() && (read = in.read(buf, remainder, buf.length - remainder)) != -1) {
+                read += remainder;
+                int aligned = read - (read % 4); // align to frame boundary (4 bytes = 1 frame)
+                if (aligned > 0) {
+                    line.write(buf, 0, aligned);
+                }
+                remainder = read - aligned;
+                if (remainder > 0) {
+                    System.arraycopy(buf, aligned, buf, 0, remainder);
+                }
+                totalBytes += aligned;
 
                 // Log progress every ~10 seconds (44100*2*2*10 = 1,764,000 bytes)
                 if (totalBytes % 1764000 < 8192) {
