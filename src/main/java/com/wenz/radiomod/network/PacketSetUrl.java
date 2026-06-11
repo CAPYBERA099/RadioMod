@@ -17,14 +17,22 @@ public class PacketSetUrl implements IMessage {
     private String url;
     private boolean playing;
     private float volume;
+    private boolean repeat;
+    private String trackTitle;
 
-    public PacketSetUrl() {} // Required for deserialization
+    public PacketSetUrl() {}
 
-    public PacketSetUrl(BlockPos pos, String url, boolean playing, float volume) {
+    public PacketSetUrl(BlockPos pos, String url, boolean playing, float volume, boolean repeat) {
+        this(pos, url, playing, volume, repeat, "");
+    }
+
+    public PacketSetUrl(BlockPos pos, String url, boolean playing, float volume, boolean repeat, String trackTitle) {
         this.pos = pos;
         this.url = url;
         this.playing = playing;
         this.volume = volume;
+        this.repeat = repeat;
+        this.trackTitle = trackTitle != null ? trackTitle : "";
     }
 
     @Override
@@ -33,6 +41,8 @@ public class PacketSetUrl implements IMessage {
         url = ByteBufUtils.readUTF8String(buf);
         playing = buf.readBoolean();
         volume = buf.readFloat();
+        repeat = buf.readableBytes() > 0 ? buf.readBoolean() : false;
+        trackTitle = buf.readableBytes() > 0 ? ByteBufUtils.readUTF8String(buf) : "";
     }
 
     @Override
@@ -41,6 +51,8 @@ public class PacketSetUrl implements IMessage {
         ByteBufUtils.writeUTF8String(buf, url);
         buf.writeBoolean(playing);
         buf.writeFloat(volume);
+        buf.writeBoolean(repeat);
+        ByteBufUtils.writeUTF8String(buf, trackTitle);
     }
 
     public static class Handler implements IMessageHandler<PacketSetUrl, IMessage> {
@@ -50,14 +62,12 @@ public class PacketSetUrl implements IMessage {
             WorldServer world = player.getServerWorld();
 
             world.addScheduledTask(() -> {
-                // Security: verify player is near the block
                 if (player.getDistanceSq(msg.pos) > 64 * 64) return;
 
                 TileEntity te = world.getTileEntity(msg.pos);
                 if (te instanceof TileRadio) {
                     TileRadio radio = (TileRadio) te;
-                    // setState does a single markDirtyAndSync which notifies ALL clients
-                    radio.setState(msg.url, msg.playing, msg.volume);
+                    radio.setStateWithTitle(msg.url, msg.playing, msg.volume, msg.repeat, msg.trackTitle);
                 }
             });
             return null;

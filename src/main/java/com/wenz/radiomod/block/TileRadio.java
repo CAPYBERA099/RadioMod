@@ -1,5 +1,6 @@
 package com.wenz.radiomod.block;
 
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.network.NetworkManager;
 import net.minecraft.network.play.server.SPacketUpdateTileEntity;
@@ -7,21 +8,24 @@ import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.math.BlockPos;
 
 import javax.annotation.Nullable;
+import java.util.UUID;
 
 public class TileRadio extends TileEntity {
 
     private String streamUrl = "";
     private boolean playing = false;
     private float volume = 1.0f;
+    private boolean repeat = false;
+    private String trackTitle = "";
 
-    /**
-     * Client-side callback for audio sync.
-     * Set by ClientProxy. Called when tile state is synced from server.
-     */
+    /* ---------- GUI lock ---------- */
+    private UUID lockedByUUID = null;
+    private String lockedByName = "";
+
     public static IRadioSyncHandler syncHandler = null;
 
     public interface IRadioSyncHandler {
-        void onSync(BlockPos pos, String url, boolean playing, float volume,
+        void onSync(BlockPos pos, String url, boolean playing, float volume, boolean repeat,
                     boolean wasPlaying, String oldUrl);
     }
 
@@ -30,6 +34,8 @@ public class TileRadio extends TileEntity {
     public String getStreamUrl()  { return streamUrl; }
     public boolean isPlaying()    { return playing; }
     public float   getVolume()    { return volume; }
+    public boolean isRepeat()     { return repeat; }
+    public String  getTrackTitle(){ return trackTitle; }
 
     public void setStreamUrl(String url) {
         this.streamUrl = url != null ? url : "";
@@ -46,12 +52,60 @@ public class TileRadio extends TileEntity {
         markDirtyAndSync();
     }
 
+    public void setRepeat(boolean repeat) {
+        this.repeat = repeat;
+        markDirtyAndSync();
+    }
+
+    public void setTrackTitle(String title) {
+        this.trackTitle = title != null ? title : "";
+        markDirtyAndSync();
+    }
+
     /** Set all fields and sync once. */
-    public void setState(String url, boolean playing, float volume) {
+    public void setState(String url, boolean playing, float volume, boolean repeat) {
         this.streamUrl = url != null ? url : "";
         this.playing = playing;
         this.volume = Math.max(0f, Math.min(1f, volume));
+        this.repeat = repeat;
         markDirtyAndSync();
+    }
+
+    /** Set all fields including title and sync once. */
+    public void setStateWithTitle(String url, boolean playing, float volume, boolean repeat, String title) {
+        this.streamUrl = url != null ? url : "";
+        this.playing = playing;
+        this.volume = Math.max(0f, Math.min(1f, volume));
+        this.repeat = repeat;
+        this.trackTitle = title != null ? title : "";
+        markDirtyAndSync();
+    }
+
+    /* ---------- GUI lock methods ---------- */
+
+    public boolean isLocked() { return lockedByUUID != null; }
+
+    public boolean isLockedBy(EntityPlayer player) {
+        return lockedByUUID != null && lockedByUUID.equals(player.getUniqueID());
+    }
+
+    public String getLockedByName() { return lockedByName; }
+
+    public void lock(EntityPlayer player) {
+        this.lockedByUUID = player.getUniqueID();
+        this.lockedByName = player.getName();
+    }
+
+    public void unlock(EntityPlayer player) {
+        if (lockedByUUID != null && lockedByUUID.equals(player.getUniqueID())) {
+            lockedByUUID = null;
+            lockedByName = "";
+        }
+    }
+
+    public void forceUnlock() {
+        lockedByUUID = null;
+        lockedByName = "";
     }
 
     private void markDirtyAndSync() {
@@ -69,15 +123,19 @@ public class TileRadio extends TileEntity {
         compound.setString("StreamUrl", streamUrl);
         compound.setBoolean("Playing", playing);
         compound.setFloat("Volume", volume);
+        compound.setBoolean("Repeat", repeat);
+        compound.setString("TrackTitle", trackTitle);
         return compound;
     }
 
     @Override
     public void readFromNBT(NBTTagCompound compound) {
         super.readFromNBT(compound);
-        streamUrl = compound.getString("StreamUrl");
-        playing   = compound.getBoolean("Playing");
-        volume    = compound.hasKey("Volume") ? compound.getFloat("Volume") : 1.0f;
+        streamUrl  = compound.getString("StreamUrl");
+        playing    = compound.getBoolean("Playing");
+        volume     = compound.hasKey("Volume") ? compound.getFloat("Volume") : 1.0f;
+        repeat     = compound.getBoolean("Repeat");
+        trackTitle = compound.hasKey("TrackTitle") ? compound.getString("TrackTitle") : "";
     }
 
     /* ---------- client sync ---------- */
@@ -95,15 +153,11 @@ public class TileRadio extends TileEntity {
 
     @Override
     public void onDataPacket(NetworkManager net, SPacketUpdateTileEntity pkt) {
-        // Save old state before reading new
         boolean wasPlaying = this.playing;
         String oldUrl = this.streamUrl;
-
         readFromNBT(pkt.getNbtCompound());
-
-        // Trigger client-side audio sync
         if (world != null && world.isRemote && syncHandler != null) {
-            syncHandler.onSync(pos, streamUrl, playing, volume, wasPlaying, oldUrl);
+            syncHandler.onSync(pos, streamUrl, playing, volume, repeat, wasPlaying, oldUrl);
         }
     }
 
@@ -111,12 +165,9 @@ public class TileRadio extends TileEntity {
     public void handleUpdateTag(NBTTagCompound tag) {
         boolean wasPlaying = this.playing;
         String oldUrl = this.streamUrl;
-
         readFromNBT(tag);
-
-        // Also sync on initial chunk load
         if (world != null && world.isRemote && syncHandler != null) {
-            syncHandler.onSync(pos, streamUrl, playing, volume, wasPlaying, oldUrl);
+            syncHandler.onSync(pos, streamUrl, playing, volume, repeat, wasPlaying, oldUrl);
         }
     }
 }

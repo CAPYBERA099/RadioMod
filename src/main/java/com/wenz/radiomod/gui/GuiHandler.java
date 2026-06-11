@@ -23,7 +23,7 @@ public class GuiHandler implements IGuiHandler {
         if (id == 0) {
             TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
             if (te instanceof TileRadio) {
-                return new ContainerRadio((TileRadio) te);
+                return new ContainerRadio((TileRadio) te, player);
             }
         }
         return null;
@@ -35,7 +35,7 @@ public class GuiHandler implements IGuiHandler {
         if (id == 0) {
             TileEntity te = world.getTileEntity(new BlockPos(x, y, z));
             if (te instanceof TileRadio) {
-                return new GuiRadio(new ContainerRadio((TileRadio) te));
+                return new GuiRadio(new ContainerRadio((TileRadio) te, player));
             }
         }
         return null;

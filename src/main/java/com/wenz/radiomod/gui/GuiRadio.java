@@ -19,19 +19,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * Radio GUI with two modes:
- *   1. URL mode — paste a direct URL and play
- *   2. Search mode — search mp3juice.sc, browse results, click to play via mp3juice converter
- *
- * Features: volume slider, state saving, server sync for all players.
- */
 public class GuiRadio extends GuiContainer {
 
     private final ContainerRadio container;
     private GuiTextField inputField;
 
-    /* ======== Persistent state per radio block ======== */
+    /* ======== Persistent search state per radio block ======== */
     private static final Map<BlockPos, SearchState> SAVED_STATE = new HashMap<BlockPos, SearchState>();
 
     private static class SearchState {
@@ -42,52 +35,61 @@ public class GuiRadio extends GuiContainer {
         int selectedIndex = -1;
     }
 
-    // Current state (loaded from SAVED_STATE on init, saved back on close)
     private boolean searchMode = false;
     private List<Mp3JuiceSearch.SearchResult> searchResults = new ArrayList<Mp3JuiceSearch.SearchResult>();
     private int scrollOffset = 0;
     private int selectedIndex = -1;
 
-    // Search/convert status
     private boolean searching = false;
     private boolean converting = false;
-    private String statusMessage = null; // shown in results area
-    private String statusColor = "gray"; // "gray", "red", "green", "yellow"
+    private String statusMessage = null;
+    private String statusColor = "gray";
 
-    // Volume slider
     private boolean draggingVolume = false;
+    private boolean draggingSeek = false;
+
+    /* ======== Layout constants ======== */
     private static final int SLIDER_W = 120;
     private static final int SLIDER_H = 10;
     private static final int KNOB_W = 6;
 
-    // Layout
     private static final int RESULTS_VISIBLE = 5;
     private static final int RESULT_HEIGHT = 22;
 
-    // Colors
-    private static final int BG         = 0xDD1a1a2e;
-    private static final int BORDER     = 0xFFe94560;
-    private static final int TITLE_BG   = 0xFF0f3460;
-    private static final int TEXT_COL   = 0xFFe94560;
-    private static final int GREEN      = 0xFF00ff88;
-    private static final int GRAY       = 0xFF777777;
-    private static final int RESULT_BG  = 0xFF16213e;
-    private static final int RESULT_HOV = 0xFF1a1a40;
-    private static final int RESULT_SEL = 0xFF0f3460;
-    private static final int DUR_COL    = 0xFF888888;
-    private static final int WHITE      = 0xFFFFFFFF;
-    private static final int YELLOW     = 0xFFffd700;
-    private static final int RED        = 0xFFff4444;
-    private static final int SLIDER_BG  = 0xFF333355;
-    private static final int SLIDER_FG  = 0xFFe94560;
-    private static final int SLIDER_KNB = 0xFFFFFFFF;
+    // Player preview panel dimensions
+    private static final int PREVIEW_H = 38;
+    private static final int SEEK_BAR_H = 6;
 
-    // Button IDs
+    /* ======== Colors ======== */
+    private static final int BG          = 0xDD1a1a2e;
+    private static final int BORDER      = 0xFFe94560;
+    private static final int TITLE_BG    = 0xFF0f3460;
+    private static final int TEXT_COL    = 0xFFe94560;
+    private static final int GREEN       = 0xFF00ff88;
+    private static final int GRAY        = 0xFF777777;
+    private static final int RESULT_BG   = 0xFF16213e;
+    private static final int RESULT_HOV  = 0xFF1a1a40;
+    private static final int RESULT_SEL  = 0xFF0f3460;
+    private static final int DUR_COL     = 0xFF888888;
+    private static final int WHITE       = 0xFFFFFFFF;
+    private static final int YELLOW      = 0xFFffd700;
+    private static final int RED         = 0xFFff4444;
+    private static final int SLIDER_BG   = 0xFF333355;
+    private static final int SLIDER_FG   = 0xFFe94560;
+    private static final int SLIDER_KNB  = 0xFFFFFFFF;
+    private static final int PREVIEW_BG  = 0xFF0d1117;
+    private static final int SEEK_BG     = 0xFF333355;
+    private static final int SEEK_FG     = 0xFF00ff88;
+    private static final int SEEK_KNOB   = 0xFFFFFFFF;
+
+    /* ======== Button IDs ======== */
     private static final int BTN_PLAY    = 1;
     private static final int BTN_STOP    = 2;
     private static final int BTN_MODE    = 5;
     private static final int BTN_SEARCH  = 6;
     private static final int BTN_MUTE    = 7;
+    private static final int BTN_REPEAT  = 8;
+    private static final int BTN_PAUSE   = 9;
 
     public GuiRadio(ContainerRadio container) {
         super(container);
@@ -101,7 +103,6 @@ public class GuiRadio extends GuiContainer {
         super.initGui();
         Keyboard.enableRepeatEvents(true);
 
-        // Restore saved state for this radio block
         BlockPos pos = container.getTile().getPos();
         SearchState saved = SAVED_STATE.get(pos);
         if (saved != null) {
@@ -114,23 +115,32 @@ public class GuiRadio extends GuiContainer {
         rebuildGui(saved != null ? saved.query : null);
     }
 
-    private void rebuildGui(String restoreQuery) {
-        int x, y;
+    private boolean isPreviewVisible() {
+        BlockPos pos = container.getTile().getPos();
+        return RadioAudioManager.isPlaying(pos) || RadioAudioManager.isPaused(pos);
+    }
 
-        // Resize based on mode
+    private void rebuildGui(String restoreQuery) {
+        // Calculate height
+        int baseH = 100;
+
         if (searchMode && !searchResults.isEmpty()) {
-            this.ySize = 115 + Math.min(searchResults.size(), RESULTS_VISIBLE) * RESULT_HEIGHT + 28;
+            baseH = 100 + Math.min(searchResults.size(), RESULTS_VISIBLE) * RESULT_HEIGHT + 28;
         } else if (searchMode && statusMessage != null) {
-            this.ySize = 130;
-        } else {
-            this.ySize = 115;
+            baseH = 115;
         }
+
+        // Add player preview panel if something is playing/paused
+        if (isPreviewVisible()) {
+            baseH += PREVIEW_H + 4;
+        }
+
+        this.ySize = baseH;
         this.guiLeft = (this.width - this.xSize) / 2;
         this.guiTop = (this.height - this.ySize) / 2;
-        x = guiLeft;
-        y = guiTop;
+        int x = guiLeft;
+        int y = guiTop;
 
-        // Input field
         String prevText = (inputField != null) ? inputField.getText() : restoreQuery;
         inputField = new GuiTextField(0, fontRenderer, x + 10, y + 30, 197, 18);
         inputField.setMaxStringLength(512);
@@ -142,16 +152,10 @@ public class GuiRadio extends GuiContainer {
         }
         inputField.setFocused(true);
 
-        // Buttons
         buttonList.clear();
 
         String modeLabel = searchMode ? "\u266B URL" : "\u26A1 Search";
         buttonList.add(new GuiButton(BTN_MODE, x + 210, y + 30, 40, 18, modeLabel));
-
-        // Mute button — local only, doesn't affect other players
-        boolean muted = RadioAudioManager.isLocalMuted(container.getTile().getPos());
-        String muteLabel = muted ? "\uD83D\uDD0A" : "\uD83D\uDD07";
-        buttonList.add(new GuiButton(BTN_MUTE, x + 210, y + 82, 40, 14, muteLabel));
 
         if (searchMode) {
             buttonList.add(new GuiButton(BTN_SEARCH, x + 10, y + 56, 105, 20, "\u26A1 Search"));
@@ -160,12 +164,22 @@ public class GuiRadio extends GuiContainer {
             buttonList.add(new GuiButton(BTN_PLAY, x + 10, y + 56, 105, 20, "\u25B6 Play"));
             buttonList.add(new GuiButton(BTN_STOP, x + 125, y + 56, 105, 20, "\u23F9 Stop"));
         }
+
+        // Mute button
+        boolean muted = RadioAudioManager.isLocalMuted(container.getTile().getPos());
+        String muteLabel = muted ? "\uD83D\uDD0A" : "\uD83D\uDD07";
+        buttonList.add(new GuiButton(BTN_MUTE, x + 210, y + 82, 20, 14, muteLabel));
+
+        // Repeat button — highlighted when active
+        boolean rep = container.getTile().isRepeat();
+        String repLabel = "\u21BB";
+        buttonList.add(new GuiButton(BTN_REPEAT, x + 232, y + 82, 20, 14, repLabel));
     }
 
-    /* ======== Volume slider ======== */
+    /* ======== Volume slider coords ======== */
 
     private int sliderX() { return 10; }
-    private int sliderY() { return 84; }
+    private int sliderY() { return 82; }
 
     private float getSliderValue(int mouseX) {
         int sx = guiLeft + sliderX();
@@ -173,7 +187,19 @@ public class GuiRadio extends GuiContainer {
         return Math.max(0f, Math.min(1f, raw));
     }
 
-    /* ======== GUI close — save state ======== */
+    /* ======== Player preview coords ======== */
+
+    /** Y position of the player preview panel (absolute screen coords). */
+    private int previewY() {
+        // preview sits at the bottom of the GUI
+        return guiTop + ySize - PREVIEW_H - 2;
+    }
+
+    private int seekBarX() { return guiLeft + 30; }
+    private int seekBarY() { return previewY() + 24; }
+    private int seekBarW() { return xSize - 60; }
+
+    /* ======== Close ======== */
 
     @Override
     public void onGuiClosed() {
@@ -183,7 +209,6 @@ public class GuiRadio extends GuiContainer {
         TileRadio tile = container.getTile();
         BlockPos pos = tile.getPos();
 
-        // Save search state
         SearchState state = new SearchState();
         state.searchMode = searchMode;
         state.query = inputField.getText();
@@ -192,12 +217,11 @@ public class GuiRadio extends GuiContainer {
         state.selectedIndex = selectedIndex;
         SAVED_STATE.put(pos, state);
 
-        // Save URL in URL mode
         if (!searchMode) {
             String currentText = inputField.getText().trim();
             if (!currentText.isEmpty() && !currentText.equals(tile.getStreamUrl())) {
                 PacketHandler.INSTANCE.sendToServer(
-                        new PacketSetUrl(tile.getPos(), currentText, tile.isPlaying(), tile.getVolume()));
+                        new PacketSetUrl(tile.getPos(), currentText, tile.isPlaying(), tile.getVolume(), tile.isRepeat(), tile.getTrackTitle()));
             }
         }
     }
@@ -210,24 +234,25 @@ public class GuiRadio extends GuiContainer {
             case BTN_MODE:
                 searchMode = !searchMode;
                 if (searchMode) {
-                    // Keep existing query/results if switching back
-                    if (searchResults.isEmpty()) {
-                        inputField.setText("");
-                    }
+                    if (searchResults.isEmpty()) inputField.setText("");
                 } else {
                     inputField.setText(tile.getStreamUrl());
                 }
                 rebuildGui(null);
                 break;
 
-            case BTN_PLAY:
+            case BTN_PLAY: {
                 String url = inputField.getText().trim();
                 if (!url.isEmpty()) {
+                    String title = url; // For direct URL, use URL as title
+                    if (title.length() > 50) title = title.substring(title.lastIndexOf('/') + 1);
                     PacketHandler.INSTANCE.sendToServer(
-                            new PacketSetUrl(tile.getPos(), url, true, tile.getVolume()));
+                            new PacketSetUrl(tile.getPos(), url, true, tile.getVolume(), tile.isRepeat(), title));
                     RadioAudioManager.play(tile.getPos(), url, tile.getVolume());
+                    rebuildGui(null);
                 }
                 break;
+            }
 
             case BTN_SEARCH:
                 doSearch();
@@ -235,23 +260,31 @@ public class GuiRadio extends GuiContainer {
 
             case BTN_STOP:
                 PacketHandler.INSTANCE.sendToServer(
-                        new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), false, tile.getVolume()));
+                        new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), false, tile.getVolume(), tile.isRepeat(), ""));
                 RadioAudioManager.stop(tile.getPos());
+                rebuildGui(null);
                 break;
 
             case BTN_MUTE:
                 if (RadioAudioManager.isLocalMuted(tile.getPos())) {
-                    // Unmute — resume playback if radio is playing on server
                     RadioAudioManager.unmuteLocal(tile.getPos());
                     if (tile.isPlaying() && !tile.getStreamUrl().isEmpty()) {
                         RadioAudioManager.play(tile.getPos(), tile.getStreamUrl(), tile.getVolume());
                     }
                 } else {
-                    // Mute locally — stops audio but doesn't tell server
                     RadioAudioManager.muteLocal(tile.getPos());
                 }
                 rebuildGui(null);
                 break;
+
+            case BTN_REPEAT: {
+                boolean newRepeat = !tile.isRepeat();
+                tile.setRepeat(newRepeat);
+                PacketHandler.INSTANCE.sendToServer(
+                        new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), tile.getVolume(), newRepeat, tile.getTrackTitle()));
+                rebuildGui(null);
+                break;
+            }
         }
     }
 
@@ -294,10 +327,6 @@ public class GuiRadio extends GuiContainer {
         }, "RadioMod-Search").start();
     }
 
-    /**
-     * Play a search result: convert via mp3juice.sc → direct MP3 → play.
-     * NO YouTube URL created — everything goes through mp3juice converter.
-     */
     private void playResult(final Mp3JuiceSearch.SearchResult result) {
         if (result == null || converting) return;
 
@@ -308,31 +337,33 @@ public class GuiRadio extends GuiContainer {
         final TileRadio tile = container.getTile();
         final BlockPos pos = tile.getPos();
         final float volume = tile.getVolume();
+        final boolean repeat = tile.isRepeat();
+        final String title = result.title;
 
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    // Convert via mp3juice.sc backend → direct MP3 URL
                     String mp3Url = Mp3JuiceConverter.convert(result.videoId);
 
                     if (mp3Url != null) {
-                        // Success! Play the direct MP3
-                        statusMessage = "\u25B6 " + result.title;
+                        statusMessage = "\u25B6 " + title;
                         statusColor = "green";
 
-                        // Send MP3 URL to server → syncs to all players
                         PacketHandler.INSTANCE.sendToServer(
-                                new PacketSetUrl(pos, mp3Url, true, volume));
-                        // Play locally for instant feedback
+                                new PacketSetUrl(pos, mp3Url, true, volume, repeat, title));
                         RadioAudioManager.play(pos, mp3Url, volume);
+
+                        mc.addScheduledTask(new Runnable() {
+                            @Override
+                            public void run() { rebuildGui(null); }
+                        });
                     } else {
-                        // Failed
                         String err = Mp3JuiceConverter.lastError;
                         if (err != null && err.contains("unavailable")) {
-                            statusMessage = "Track unavailable — try another";
+                            statusMessage = "Track unavailable \u2014 try another";
                         } else {
-                            statusMessage = "Conversion failed — try another";
+                            statusMessage = "Conversion failed \u2014 try another";
                         }
                         statusColor = "red";
                     }
@@ -346,7 +377,7 @@ public class GuiRadio extends GuiContainer {
         }, "RadioMod-Convert").start();
     }
 
-    /* ======== Input ======== */
+    /* ======== Input handling ======== */
 
     @Override
     protected void keyTyped(char typedChar, int keyCode) throws IOException {
@@ -356,11 +387,8 @@ public class GuiRadio extends GuiContainer {
                 return;
             }
             if (keyCode == Keyboard.KEY_RETURN) {
-                if (searchMode) {
-                    doSearch();
-                } else {
-                    actionPerformed(new GuiButton(BTN_PLAY, 0, 0, 0, 0, ""));
-                }
+                if (searchMode) doSearch();
+                else actionPerformed(new GuiButton(BTN_PLAY, 0, 0, 0, 0, ""));
                 return;
             }
             inputField.textboxKeyTyped(typedChar, keyCode);
@@ -383,7 +411,34 @@ public class GuiRadio extends GuiContainer {
             return;
         }
 
-        // Search result click
+        // Player preview panel interactions
+        if (isPreviewVisible()) {
+            BlockPos pos = container.getTile().getPos();
+            int py = previewY();
+
+            // Pause/Play button area (left side of preview)
+            if (mouseX >= guiLeft + 8 && mouseX <= guiLeft + 26 && mouseY >= py + 4 && mouseY <= py + 20) {
+                if (RadioAudioManager.isPaused(pos)) {
+                    RadioAudioManager.resume(pos);
+                } else {
+                    RadioAudioManager.pause(pos);
+                }
+                return;
+            }
+
+            // Seek bar
+            int sbX = seekBarX();
+            int sbY = seekBarY();
+            int sbW = seekBarW();
+            float total = RadioAudioManager.getTotalSeconds(pos);
+            if (total > 0 && mouseX >= sbX && mouseX <= sbX + sbW && mouseY >= sbY - 3 && mouseY <= sbY + SEEK_BAR_H + 3) {
+                draggingSeek = true;
+                updateSeek(mouseX);
+                return;
+            }
+        }
+
+        // Search results
         if (searchMode && !searchResults.isEmpty() && !converting) {
             int listX = guiLeft + 10;
             int listY = guiTop + 105;
@@ -409,6 +464,7 @@ public class GuiRadio extends GuiContainer {
     protected void mouseClickMove(int mouseX, int mouseY, int clickedMouseButton, long timeSinceLastClick) {
         super.mouseClickMove(mouseX, mouseY, clickedMouseButton, timeSinceLastClick);
         if (draggingVolume) updateVolume(mouseX);
+        if (draggingSeek) updateSeek(mouseX);
     }
 
     @Override
@@ -418,7 +474,10 @@ public class GuiRadio extends GuiContainer {
             draggingVolume = false;
             TileRadio tile = container.getTile();
             PacketHandler.INSTANCE.sendToServer(
-                    new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), tile.getVolume()));
+                    new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), tile.isPlaying(), tile.getVolume(), tile.isRepeat(), tile.getTrackTitle()));
+        }
+        if (draggingSeek) {
+            draggingSeek = false;
         }
     }
 
@@ -429,6 +488,19 @@ public class GuiRadio extends GuiContainer {
         RadioAudioManager.setVolume(tile.getPos(), vol);
     }
 
+    private void updateSeek(int mouseX) {
+        BlockPos pos = container.getTile().getPos();
+        float total = RadioAudioManager.getTotalSeconds(pos);
+        if (total <= 0) return;
+
+        int sbX = seekBarX();
+        int sbW = seekBarW();
+        float frac = (float)(mouseX - sbX) / (float) sbW;
+        frac = Math.max(0f, Math.min(1f, frac));
+        float seekSec = frac * total;
+        RadioAudioManager.seek(pos, seekSec);
+    }
+
     @Override
     public void handleMouseInput() throws IOException {
         super.handleMouseInput();
@@ -437,11 +509,18 @@ public class GuiRadio extends GuiContainer {
             if (scroll > 0) {
                 scrollOffset = Math.max(0, scrollOffset - 1);
             } else if (scroll < 0) {
-                if (scrollOffset + RESULTS_VISIBLE < searchResults.size()) {
-                    scrollOffset++;
-                }
+                if (scrollOffset + RESULTS_VISIBLE < searchResults.size()) scrollOffset++;
             }
         }
+    }
+
+    /* ======== Time formatting ======== */
+
+    private static String formatTime(float seconds) {
+        int s = Math.max(0, (int) seconds);
+        int min = s / 60;
+        int sec = s % 60;
+        return String.format("%d:%02d", min, sec);
     }
 
     /* ======== Rendering ======== */
@@ -451,7 +530,7 @@ public class GuiRadio extends GuiContainer {
         int x = guiLeft, y = guiTop;
         int w = xSize, h = ySize;
 
-        // Background + border
+        // Main background
         drawRect(x, y, x + w, y + h, BG);
         drawRect(x, y, x + w, y + 1, BORDER);
         drawRect(x, y + h - 1, x + w, y + h, BORDER);
@@ -473,7 +552,7 @@ public class GuiRadio extends GuiContainer {
         drawRect(sx, sy, sx + SLIDER_W, sy + 1, 0xFF555577);
         drawRect(sx, sy + SLIDER_H - 1, sx + SLIDER_W, sy + SLIDER_H, 0xFF555577);
 
-        // Search results background
+        // Search results
         if (searchMode && !searchResults.isEmpty()) {
             int listX = x + 10;
             int listY = y + 105;
@@ -494,30 +573,92 @@ public class GuiRadio extends GuiContainer {
 
                 int bg = selected ? RESULT_SEL : (hovered ? RESULT_HOV : RESULT_BG);
                 drawRect(listX, itemY, listX + listW, itemY + RESULT_HEIGHT - 2, bg);
+                if (selected) drawRect(listX, itemY, listX + 2, itemY + RESULT_HEIGHT - 2, GREEN);
+            }
+        }
 
-                if (selected) {
-                    drawRect(listX, itemY, listX + 2, itemY + RESULT_HEIGHT - 2, GREEN);
-                }
+        // ======== Player preview panel ========
+        if (isPreviewVisible()) {
+            BlockPos pos = tile.getPos();
+            int py = previewY();
+            int pw = w - 4;
+            int px = x + 2;
+
+            // Panel background
+            drawRect(px, py, px + pw, py + PREVIEW_H, PREVIEW_BG);
+            drawRect(px, py, px + pw, py + 1, 0xFF333355);
+
+            // Seek bar
+            float elapsed = RadioAudioManager.getElapsedSeconds(pos);
+            float total = RadioAudioManager.getTotalSeconds(pos);
+
+            int sbX = seekBarX();
+            int sbY = seekBarY();
+            int sbW = seekBarW();
+
+            drawRect(sbX, sbY, sbX + sbW, sbY + SEEK_BAR_H, SEEK_BG);
+
+            if (total > 0) {
+                float frac = Math.min(1f, elapsed / total);
+                int seekFillW = (int)(frac * sbW);
+                drawRect(sbX, sbY, sbX + seekFillW, sbY + SEEK_BAR_H, SEEK_FG);
+
+                // Seek knob
+                int seekKnobX = sbX + seekFillW - 3;
+                drawRect(seekKnobX, sbY - 2, seekKnobX + 6, sbY + SEEK_BAR_H + 2, SEEK_KNOB);
+            } else {
+                // Unknown duration — show indeterminate
+                int animW = 30;
+                int animX = (int)((System.currentTimeMillis() / 20) % (sbW + animW)) - animW;
+                int ax1 = Math.max(sbX, sbX + animX);
+                int ax2 = Math.min(sbX + sbW, sbX + animX + animW);
+                if (ax2 > ax1) drawRect(ax1, sbY, ax2, sbY + SEEK_BAR_H, 0xFF555577);
+            }
+
+            // Pause/Play button highlight on hover
+            if (mouseX >= px + 6 && mouseX <= px + 24 && mouseY >= py + 4 && mouseY <= py + 18) {
+                drawRect(px + 5, py + 3, px + 25, py + 19, 0x33FFFFFF);
             }
         }
     }
 
     @Override
     protected void drawGuiContainerForegroundLayer(int mouseX, int mouseY) {
-        // Title
-        String title = searchMode ? "\u26A1 Radio — mp3juice.sc" : "\u266B Radio";
+        TileRadio tile = container.getTile();
+        BlockPos pos = tile.getPos();
+
+        // Title bar
+        String title = searchMode ? "\u26A1 Radio \u2014 mp3juice.sc" : "\u266B Radio";
         fontRenderer.drawString(title, 8, 6, TEXT_COL);
 
-        // Playing indicator
-        TileRadio tile = container.getTile();
-        boolean isOn = RadioAudioManager.isPlaying(tile.getPos());
-        String status = isOn ? "\u25CF ON" : "\u25CB OFF";
-        int statusCol = isOn ? GREEN : GRAY;
+        boolean isOn = RadioAudioManager.isPlaying(pos) || RadioAudioManager.isPaused(pos);
+        String status;
+        int statusCol;
+        if (RadioAudioManager.isPaused(pos)) {
+            status = "\u23F8 PAUSE";
+            statusCol = YELLOW;
+        } else if (isOn) {
+            status = "\u25CF ON";
+            statusCol = GREEN;
+        } else {
+            status = "\u25CB OFF";
+            statusCol = GRAY;
+        }
+        if (tile.isRepeat()) status = "\u21BB " + status;
         fontRenderer.drawString(status, xSize - fontRenderer.getStringWidth(status) - 8, 6, statusCol);
 
         // Volume label
         int pct = Math.round(tile.getVolume() * 100);
         fontRenderer.drawString("Vol: " + pct + "%", sliderX() + SLIDER_W + 8, sliderY() + 1, 0xCCCCCC);
+
+        // Repeat indicator color
+        boolean rep = tile.isRepeat();
+        // Find the repeat button and update its display
+        for (GuiButton btn : buttonList) {
+            if (btn.id == BTN_REPEAT) {
+                btn.packedFGColour = rep ? 0x00ff88 : 0x777777;
+            }
+        }
 
         // Search mode content
         if (searchMode) {
@@ -526,36 +667,22 @@ public class GuiRadio extends GuiContainer {
             } else if (converting) {
                 fontRenderer.drawString("Converting to MP3...", 10, 95, YELLOW);
             } else if (statusMessage != null && searchResults.isEmpty()) {
-                int col = statusColor.equals("red") ? RED :
-                          statusColor.equals("green") ? GREEN :
-                          statusColor.equals("yellow") ? YELLOW : GRAY;
+                int col = colorFromName(statusColor);
                 fontRenderer.drawString(statusMessage, 10, 95, col);
             } else if (!searchResults.isEmpty()) {
-                // Results header
                 String info = (scrollOffset + 1) + "-"
                         + Math.min(scrollOffset + RESULTS_VISIBLE, searchResults.size())
                         + " / " + searchResults.size();
                 fontRenderer.drawString(info, 10, 95, GRAY);
 
-                // Status or "click to play"
                 if (statusMessage != null) {
-                    int col = statusColor.equals("red") ? RED :
-                              statusColor.equals("green") ? GREEN :
-                              statusColor.equals("yellow") ? YELLOW : GRAY;
-                    String msg = statusMessage;
-                    int maxW = xSize - fontRenderer.getStringWidth(info) - 25;
-                    if (fontRenderer.getStringWidth(msg) > maxW) {
-                        while (fontRenderer.getStringWidth(msg + "...") > maxW && msg.length() > 0) {
-                            msg = msg.substring(0, msg.length() - 1);
-                        }
-                        msg += "...";
-                    }
+                    int col = colorFromName(statusColor);
+                    String msg = truncateRight(statusMessage, xSize - fontRenderer.getStringWidth(info) - 25);
                     fontRenderer.drawString(msg, xSize - fontRenderer.getStringWidth(msg) - 10, 95, col);
                 } else {
                     fontRenderer.drawString("Click to play", xSize - fontRenderer.getStringWidth("Click to play") - 10, 95, GRAY);
                 }
 
-                // Result items
                 int visibleCount = Math.min(searchResults.size() - scrollOffset, RESULTS_VISIBLE);
                 for (int i = 0; i < visibleCount; i++) {
                     int idx = scrollOffset + i;
@@ -563,25 +690,57 @@ public class GuiRadio extends GuiContainer {
                     int itemY = 105 + i * RESULT_HEIGHT;
                     boolean selected = idx == selectedIndex;
 
-                    // Truncate title
-                    String titleText = r.title;
-                    int maxTitleW = xSize - 65;
-                    if (fontRenderer.getStringWidth(titleText) > maxTitleW) {
-                        while (fontRenderer.getStringWidth(titleText + "...") > maxTitleW && titleText.length() > 0) {
-                            titleText = titleText.substring(0, titleText.length() - 1);
-                        }
-                        titleText += "...";
-                    }
-
+                    String titleText = truncateRight(r.title, xSize - 65);
                     fontRenderer.drawString(titleText, 15, itemY + 3, selected ? GREEN : WHITE);
                     fontRenderer.drawString(r.duration, xSize - fontRenderer.getStringWidth(r.duration) - 15, itemY + 3, DUR_COL);
 
-                    // Source icon
                     String icon = r.source.equals("yt") ? "\u25B6" : "\u266A";
                     int iconCol = r.source.equals("yt") ? 0xFFFF0000 : 0xFFFF5500;
                     fontRenderer.drawString(icon, xSize - fontRenderer.getStringWidth(r.duration) - 25, itemY + 3, iconCol);
                 }
             }
+        }
+
+        // ======== Player preview panel ========
+        if (isPreviewVisible()) {
+            int pyRel = previewY() - guiTop; // relative to GUI top
+
+            // Pause/Play icon
+            boolean paused = RadioAudioManager.isPaused(pos);
+            String ppIcon = paused ? "\u25B6" : "\u23F8";
+            int ppCol = paused ? GREEN : WHITE;
+            fontRenderer.drawString(ppIcon, 9, pyRel + 6, ppCol);
+
+            // Track title
+            String trackTitle = tile.getTrackTitle();
+            if (trackTitle == null || trackTitle.isEmpty()) {
+                String url = tile.getStreamUrl();
+                if (url.length() > 40) {
+                    trackTitle = "..." + url.substring(url.length() - 37);
+                } else {
+                    trackTitle = url;
+                }
+            }
+            String displayTitle = truncateRight(trackTitle, xSize - 60);
+            fontRenderer.drawString(displayTitle, 28, pyRel + 6, WHITE);
+
+            // Time display
+            float elapsed = RadioAudioManager.getElapsedSeconds(pos);
+            float total = RadioAudioManager.getTotalSeconds(pos);
+
+            String timeStr;
+            if (total > 0) {
+                timeStr = formatTime(elapsed) + " / " + formatTime(total);
+            } else {
+                timeStr = formatTime(elapsed);
+            }
+            int timeW = fontRenderer.getStringWidth(timeStr);
+
+            // Time on the right of the seek bar
+            fontRenderer.drawString(timeStr, xSize - timeW - 8, pyRel + 24, GRAY);
+
+            // Elapsed on the left
+            fontRenderer.drawString(formatTime(elapsed), 8, pyRel + 24, GRAY);
         }
     }
 
@@ -594,4 +753,21 @@ public class GuiRadio extends GuiContainer {
 
     @Override
     public boolean doesGuiPauseGame() { return false; }
+
+    /* ======== Utility ======== */
+
+    private int colorFromName(String name) {
+        if ("red".equals(name)) return RED;
+        if ("green".equals(name)) return GREEN;
+        if ("yellow".equals(name)) return YELLOW;
+        return GRAY;
+    }
+
+    private String truncateRight(String text, int maxWidth) {
+        if (fontRenderer.getStringWidth(text) <= maxWidth) return text;
+        while (fontRenderer.getStringWidth(text + "...") > maxWidth && text.length() > 0) {
+            text = text.substring(0, text.length() - 1);
+        }
+        return text + "...";
+    }
 }
