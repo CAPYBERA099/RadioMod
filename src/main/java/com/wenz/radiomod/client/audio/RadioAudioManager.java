@@ -18,8 +18,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import javazoom.jl.decoder.*;
 
 /**
- * Client-side audio engine for 1.12.2 — DEBUG BUILD.
- * Extensive logging to diagnose 0.5s audio cutoff.
+ * Client-side audio engine for 1.12.2.
+ * Streams MP3 via JLayer with automatic resync on decode errors.
  */
 public class RadioAudioManager {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
@@ -42,32 +42,11 @@ public class RadioAudioManager {
 
     public static void play(BlockPos pos, String url, float volume) {
         RadioSource existing = SOURCES.get(pos);
-
-        // DEBUG: log every play() call
-        if (existing != null) {
-            boolean urlMatch = url.equals(existing.currentUrl);
-            LOG.info("[RadioMod] play() called: pos={} running={} urlMatch={} vol={}",
-                    pos, existing.running, urlMatch, volume);
-            if (urlMatch) {
-                LOG.info("[RadioMod] play() URL: {}", url.length() > 80 ? url.substring(0, 80) + "..." : url);
-            } else {
-                LOG.info("[RadioMod] play() OLD URL: {}", existing.currentUrl != null ?
-                        (existing.currentUrl.length() > 80 ? existing.currentUrl.substring(0, 80) + "..." : existing.currentUrl) : "null");
-                LOG.info("[RadioMod] play() NEW URL: {}", url.length() > 80 ? url.substring(0, 80) + "..." : url);
-            }
-        } else {
-            LOG.info("[RadioMod] play() called: pos={} (no existing source) vol={}", pos, volume);
-            LOG.info("[RadioMod] play() URL: {}", url.length() > 80 ? url.substring(0, 80) + "..." : url);
-        }
-
-        // If already playing the same URL, just update volume
         if (existing != null && existing.running && url.equals(existing.currentUrl)) {
             existing.baseVolume = volume;
-            LOG.info("[RadioMod] play() → same URL, updating volume only");
             return;
         }
 
-        LOG.info("[RadioMod] play() → stopping old + starting new stream");
         stop(pos);
 
         final RadioSource src = new RadioSource();
@@ -92,29 +71,13 @@ public class RadioAudioManager {
     public static void stop(BlockPos pos) {
         RadioSource src = SOURCES.remove(pos);
         if (src != null) {
-            LOG.info("[RadioMod] stop() called for pos={} running={} url={}",
-                    pos, src.running,
-                    src.currentUrl != null ? (src.currentUrl.length() > 60 ? src.currentUrl.substring(0, 60) + "..." : src.currentUrl) : "null");
-            // Log caller stack trace to find WHO is calling stop
-            StackTraceElement[] stack = Thread.currentThread().getStackTrace();
-            StringBuilder sb = new StringBuilder();
-            for (int i = 2; i < Math.min(stack.length, 8); i++) {
-                sb.append("\n    at ").append(stack[i]);
-            }
-            LOG.info("[RadioMod] stop() caller:{}", sb.toString());
-
             src.running = false;
-            if (src.ffmpegProcess != null) {
-                src.ffmpegProcess.destroyForcibly();
-            }
+            if (src.ffmpegProcess != null) src.ffmpegProcess.destroyForcibly();
             if (src.thread != null) src.thread.interrupt();
-        } else {
-            LOG.info("[RadioMod] stop() called for pos={} — no source found", pos);
         }
     }
 
     public static void stopAll() {
-        LOG.info("[RadioMod] stopAll() called");
         for (BlockPos p : SOURCES.keySet().toArray(new BlockPos[0])) stop(p);
     }
 
@@ -151,7 +114,6 @@ public class RadioAudioManager {
     /* ======== streaming core ======== */
 
     private static void stream(RadioSource src, String rawUrl) {
-        LOG.info("[RadioMod] stream() started for: {}", rawUrl);
         StreamResolver.ResolveResult resolved = StreamResolver.resolve(rawUrl);
 
         if (resolved == null) {
@@ -166,32 +128,31 @@ public class RadioAudioManager {
             if (isFfmpegAvailable()) {
                 streamFfmpeg(src, resolved.url, rawUrl);
             } else {
-                LOG.warn("[RadioMod] ffmpeg not found, trying JLayer...");
                 if (!streamJLayer(src, resolved.url, rawUrl)) {
-                    LOG.error("[RadioMod] Playback failed completely");
+                    LOG.error("[RadioMod] Playback failed. Install ffmpeg for non-MP3.");
                 }
             }
         } else {
             if (!streamJLayer(src, resolved.url, rawUrl)) {
                 if (isFfmpegAvailable()) {
-                    LOG.info("[RadioMod] JLayer failed, trying ffmpeg...");
                     streamFfmpeg(src, resolved.url, rawUrl);
-                } else {
-                    LOG.error("[RadioMod] JLayer failed, ffmpeg not available");
                 }
             }
         }
-        LOG.info("[RadioMod] stream() ended for: {}",
-                rawUrl.length() > 60 ? rawUrl.substring(0, 60) + "..." : rawUrl);
     }
 
-    /* ======== JLayer streaming (MP3) ======== */
+    /* ======== JLayer streaming with resync ======== */
 
+    /**
+     * Streams MP3 via Apache HttpClient → JLayer.
+     * Key fix: on BitstreamException, creates a NEW Bitstream + Decoder
+     * to resync from the current InputStream position instead of stopping.
+     * Also manually skips the ID3v2 tag before creating the first Bitstream.
+     */
     private static boolean streamJLayer(RadioSource src, String url, String displayUrl) {
         CloseableHttpClient httpClient = null;
         CloseableHttpResponse httpResp = null;
         try {
-            LOG.info("[RadioMod] streamJLayer: opening HTTP connection...");
             httpClient = HttpClients.createDefault();
             HttpGet req = new HttpGet(url);
             req.setConfig(HTTP_CONFIG);
@@ -202,7 +163,6 @@ public class RadioAudioManager {
 
             httpResp = httpClient.execute(req);
             int code = httpResp.getStatusLine().getStatusCode();
-            LOG.info("[RadioMod] streamJLayer: HTTP {}", code);
             if (code / 100 != 2) {
                 LOG.error("[RadioMod] HTTP {} from {}", code, url);
                 return false;
@@ -211,27 +171,29 @@ public class RadioAudioManager {
             org.apache.http.Header ctHeader = httpResp.getFirstHeader("Content-Type");
             String ct = ctHeader != null ? ctHeader.getValue() : "";
             long contentLength = httpResp.getEntity().getContentLength();
-            LOG.info("[RadioMod] streamJLayer: Content-Type={} Content-Length={}", ct, contentLength);
 
             if (ct.contains("text/html")) {
                 LOG.error("[RadioMod] Server returned HTML, not audio");
                 return false;
             }
 
-            // Check running before starting decode
-            if (!src.running) {
-                LOG.info("[RadioMod] streamJLayer: stopped before decode (src.running=false)");
-                return true;
-            }
+            if (!src.running) return true;
 
-            InputStream in = new BufferedInputStream(httpResp.getEntity().getContent(), 524288);
-            Bitstream bitstream = new Bitstream(in);
+            // 512KB buffer for network reads
+            InputStream rawIn = new BufferedInputStream(httpResp.getEntity().getContent(), 524288);
+
+            // Manually skip ID3v2 header — JLayer sometimes misparses it
+            rawIn = skipID3v2(rawIn);
+
+            // Skip to first valid MP3 sync word
+            rawIn = skipToSync(rawIn);
+
+            Bitstream bitstream = new Bitstream(rawIn);
             Decoder decoder = new Decoder();
 
-            LOG.info("[RadioMod] streamJLayer: reading first frame...");
             Header hdr = bitstream.readFrame();
             if (hdr == null) {
-                LOG.warn("[RadioMod] No MP3 frames found in stream");
+                LOG.warn("[RadioMod] No MP3 frames found");
                 return false;
             }
 
@@ -250,93 +212,192 @@ public class RadioAudioManager {
 
             AudioFormat fmt = new AudioFormat(sampleRate, 16, channels, true, false);
             int audioBufferSize = sampleRate * channels * 2 * 2; // 2 seconds
-            LOG.info("[RadioMod] streamJLayer: opening audio line {}Hz {}ch buffer={}bytes",
-                    sampleRate, channels, audioBufferSize);
-
             SourceDataLine line = (SourceDataLine) AudioSystem.getLine(
                     new DataLine.Info(SourceDataLine.class, fmt));
             line.open(fmt, audioBufferSize);
             line.start();
             src.line = line;
 
-            LOG.info("[RadioMod] ▶ Playing {}Hz {}ch {}kbps [{}] — {}",
+            LOG.info("[RadioMod] Playing {}Hz {}ch {}kbps [{}] — {}",
                     sampleRate, channels, bitrate / 1000, durationStr, displayUrl);
 
             writeFrame(line, sb);
 
-            // Decode loop with frame counting and detailed exit logging
-            int frameCount = 1; // already decoded 1 frame
-            int errorCount = 0;
-            String exitReason = "unknown";
+            int frameCount = 1;
+            int resyncCount = 0;
 
-            while (true) {
-                // Check running flag
-                if (!src.running) {
-                    exitReason = "src.running=false (stopped externally)";
-                    break;
-                }
-                // Check thread interrupt
-                if (Thread.interrupted()) {
-                    exitReason = "thread interrupted";
-                    break;
-                }
-
+            while (src.running && !Thread.interrupted()) {
                 try {
                     hdr = bitstream.readFrame();
                     if (hdr == null) {
-                        exitReason = "readFrame() returned null (EOF)";
-                        break;
+                        // Before assuming EOF, try resync (up to 5 times)
+                        if (resyncCount < 5) {
+                            LOG.info("[RadioMod] readFrame null at frame {}, resyncing... (attempt {})",
+                                    frameCount, resyncCount + 1);
+                            try { bitstream.close(); } catch (Exception ignored) {}
+                            rawIn = skipToSync(rawIn);
+                            bitstream = new Bitstream(rawIn);
+                            decoder = new Decoder();
+                            resyncCount++;
+
+                            hdr = bitstream.readFrame();
+                            if (hdr == null) {
+                                LOG.info("[RadioMod] Resync failed — true EOF at frame {}", frameCount);
+                                break;
+                            }
+                            LOG.info("[RadioMod] Resync OK — continuing from frame {}", frameCount);
+                            // Fall through to decode
+                        } else {
+                            LOG.info("[RadioMod] EOF at frame {} (max resyncs reached)", frameCount);
+                            break;
+                        }
                     }
 
                     sb = (SampleBuffer) decoder.decodeFrame(hdr, bitstream);
                     writeFrame(line, sb);
                     bitstream.closeFrame();
                     frameCount++;
-                    errorCount = 0;
 
-                    // Log progress every 500 frames (~13 seconds at 48kHz)
-                    if (frameCount % 500 == 0) {
-                        LOG.info("[RadioMod] ... {} frames decoded, running={}", frameCount, src.running);
+                    if (frameCount % 1000 == 0) {
+                        LOG.info("[RadioMod] ... {} frames decoded", frameCount);
                     }
 
                 } catch (BitstreamException e) {
-                    errorCount++;
-                    LOG.warn("[RadioMod] BitstreamException at frame {}: {}", frameCount, e.getMessage());
+                    LOG.info("[RadioMod] BitstreamException at frame {}: {} — resyncing",
+                            frameCount, e.getMessage());
                     try { bitstream.closeFrame(); } catch (Exception ignored) {}
-                    if (errorCount > 50) {
-                        exitReason = "too many BitstreamExceptions (" + errorCount + ")";
+
+                    // RESYNC: create new Bitstream + Decoder from current stream position
+                    if (resyncCount < 5) {
+                        try { bitstream.close(); } catch (Exception ignored) {}
+                        rawIn = skipToSync(rawIn);
+                        bitstream = new Bitstream(rawIn);
+                        decoder = new Decoder();
+                        resyncCount++;
+                        LOG.info("[RadioMod] Resynced (attempt {}), continuing...", resyncCount);
+                    } else {
+                        LOG.error("[RadioMod] Too many resyncs, stopping");
                         break;
                     }
                 } catch (DecoderException e) {
-                    errorCount++;
-                    LOG.warn("[RadioMod] DecoderException at frame {}: {}", frameCount, e.getMessage());
+                    LOG.info("[RadioMod] DecoderException at frame {}: {}", frameCount, e.getMessage());
                     try { bitstream.closeFrame(); } catch (Exception ignored) {}
-                    if (errorCount > 50) {
-                        exitReason = "too many DecoderExceptions (" + errorCount + ")";
-                        break;
-                    }
+                    // Decoder errors are per-frame, just skip
                 }
             }
-
-            LOG.info("[RadioMod] ■ Decode loop exited: reason='{}' frames={} running={}",
-                    exitReason, frameCount, src.running);
 
             if (src.running && src.line != null) {
                 try { src.line.drain(); } catch (Exception ignored) {}
             }
 
-            LOG.info("[RadioMod] streamJLayer returning true after {} frames", frameCount);
+            LOG.info("[RadioMod] Playback finished — {} frames, {} resyncs", frameCount, resyncCount);
             return true;
 
         } catch (Exception e) {
-            LOG.error("[RadioMod] streamJLayer EXCEPTION: {} — {}", e.getClass().getSimpleName(), e.getMessage());
-            e.printStackTrace();
+            LOG.error("[RadioMod] Playback error: {} — {}", e.getClass().getSimpleName(), e.getMessage());
             return false;
         } finally {
             cleanupLine(src);
             if (httpResp != null) try { httpResp.close(); } catch (Exception ignored) {}
             if (httpClient != null) try { httpClient.close(); } catch (Exception ignored) {}
         }
+    }
+
+    /**
+     * Skip ID3v2 header if present at the start of the stream.
+     * ID3v2 header: "ID3" + 2 version bytes + 1 flag byte + 4 syncsafe size bytes.
+     */
+    private static InputStream skipID3v2(InputStream in) throws IOException {
+        // We need to peek at the first 3 bytes
+        if (!in.markSupported()) {
+            in = new BufferedInputStream(in, 524288);
+        }
+        in.mark(10);
+        byte[] header = new byte[10];
+        int read = 0;
+        while (read < 10) {
+            int r = in.read(header, read, 10 - read);
+            if (r < 0) { in.reset(); return in; }
+            read += r;
+        }
+
+        // Check for "ID3" marker
+        if (header[0] == 'I' && header[1] == 'D' && header[2] == '3') {
+            // Syncsafe integer: 4 bytes, 7 bits each
+            int size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) |
+                       ((header[8] & 0x7F) << 7) | (header[9] & 0x7F);
+            // Check for footer flag (bit 4 of flags byte)
+            if ((header[5] & 0x10) != 0) size += 10;
+
+            LOG.info("[RadioMod] Skipping ID3v2 header: {} bytes", size + 10);
+
+            // Skip the tag body (we already read 10 bytes of header)
+            long remaining = size;
+            while (remaining > 0) {
+                long skipped = in.skip(remaining);
+                if (skipped <= 0) {
+                    // skip() returned 0, try reading
+                    int b = in.read();
+                    if (b < 0) break;
+                    remaining--;
+                } else {
+                    remaining -= skipped;
+                }
+            }
+            return in;
+        } else {
+            // Not an ID3 tag, reset
+            in.reset();
+            return in;
+        }
+    }
+
+    /**
+     * Skip bytes until we find an MP3 sync word (0xFF 0xE0+).
+     * Reads up to 64KB looking for sync. If not found, returns stream as-is.
+     */
+    private static InputStream skipToSync(InputStream in) throws IOException {
+        if (!in.markSupported()) {
+            in = new BufferedInputStream(in, 524288);
+        }
+
+        int skipped = 0;
+        int maxSkip = 65536;
+        in.mark(maxSkip + 2);
+
+        int prev = -1;
+        while (skipped < maxSkip) {
+            int b = in.read();
+            if (b < 0) {
+                // EOF before finding sync
+                in.reset();
+                return in;
+            }
+
+            if (prev == 0xFF && (b & 0xE0) == 0xE0) {
+                // Found sync! We need to "unread" these 2 bytes.
+                // Reset and skip to position (skipped - 1)
+                in.reset();
+                long toSkip = skipped - 1; // position of 0xFF byte
+                while (toSkip > 0) {
+                    long s = in.skip(toSkip);
+                    if (s <= 0) { in.read(); toSkip--; }
+                    else toSkip -= s;
+                }
+                if (skipped > 1) {
+                    LOG.info("[RadioMod] Skipped {} bytes to find MP3 sync", skipped - 1);
+                }
+                return in;
+            }
+
+            prev = b;
+            skipped++;
+        }
+
+        // Didn't find sync within 64KB, reset and let JLayer handle it
+        in.reset();
+        LOG.warn("[RadioMod] No MP3 sync found in first 64KB");
+        return in;
     }
 
     /* ======== FFmpeg pipe path ======== */
@@ -372,7 +433,7 @@ public class RadioAudioManager {
             AudioFormat fmt = new AudioFormat(44100, 16, 2, true, false);
             SourceDataLine line = (SourceDataLine) AudioSystem.getLine(
                     new DataLine.Info(SourceDataLine.class, fmt));
-            line.open(fmt, 44100 * 2 * 2);
+            line.open(fmt, 44100 * 2 * 2 * 2);
             line.start();
             src.line = line;
 
