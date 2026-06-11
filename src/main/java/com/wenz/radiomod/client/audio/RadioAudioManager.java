@@ -7,6 +7,7 @@ import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -20,14 +21,23 @@ import javazoom.jl.decoder.*;
 
 /**
  * Client-side audio engine for 1.12.2.
- * Supports two playback paths:
- *   1. JLayer — for MP3 streams (internet radio, .mp3 files, mp3juice downloads)
- *   2. FFmpeg pipe — for any other format (AAC, Opus, OGG, FLAC, etc.)
+ * Downloads the full MP3 into memory, then plays via JLayer — no network stalls during playback.
+ * Falls back to FFmpeg pipe for non-MP3 formats.
  */
 public class RadioAudioManager {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
     private static final Map<BlockPos, RadioSource> SOURCES = new ConcurrentHashMap<BlockPos, RadioSource>();
     private static final float MAX_DISTANCE = 48f;
+
+    private static final String USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+    private static final RequestConfig HTTP_CONFIG = RequestConfig.custom()
+            .setConnectTimeout(10000)
+            .setSocketTimeout(30000)
+            .setConnectionRequestTimeout(5000)
+            .build();
 
     // FFmpeg availability (cached after first check)
     private static Boolean ffmpegAvailable = null;
@@ -127,14 +137,14 @@ public class RadioAudioManager {
                 streamFfmpeg(src, resolved.url, rawUrl);
             } else {
                 LOG.warn("[RadioMod] ffmpeg not found, trying JLayer for non-MP3...");
-                if (!streamJLayer(src, resolved.url, rawUrl)) {
+                if (!playJLayer(src, resolved.url, rawUrl)) {
                     LOG.error("[RadioMod] Playback failed. Install ffmpeg for non-MP3 audio:");
                     LOG.error("[RadioMod]   winget install ffmpeg");
                 }
             }
         } else {
-            // MP3 stream — use JLayer directly
-            if (!streamJLayer(src, resolved.url, rawUrl)) {
+            // MP3 — download fully then play via JLayer
+            if (!playJLayer(src, resolved.url, rawUrl)) {
                 if (isFfmpegAvailable()) {
                     LOG.info("[RadioMod] JLayer failed, trying ffmpeg...");
                     streamFfmpeg(src, resolved.url, rawUrl);
@@ -143,25 +153,22 @@ public class RadioAudioManager {
         }
     }
 
-    /* ======== JLayer (MP3) path ======== */
+    /* ======== Download + JLayer (MP3) path ======== */
 
-    private static final RequestConfig HTTP_CONFIG = RequestConfig.custom()
-            .setConnectTimeout(10000)
-            .setSocketTimeout(30000)
-            .setConnectionRequestTimeout(5000)
-            .build();
-
-    private static boolean streamJLayer(RadioSource src, String url, String displayUrl) {
+    /**
+     * Downloads the entire MP3 into memory, then decodes and plays via JLayer.
+     * This avoids network stalls causing JLayer to think the stream ended.
+     */
+    private static boolean playJLayer(RadioSource src, String url, String displayUrl) {
+        // Step 1: Download entire MP3 into byte array
+        byte[] mp3Data;
         CloseableHttpClient httpClient = null;
         CloseableHttpResponse httpResp = null;
         try {
-            // Use Apache HttpClient — Java's HttpURLConnection strips Origin header
             httpClient = HttpClients.createDefault();
             HttpGet req = new HttpGet(url);
             req.setConfig(HTTP_CONFIG);
-            req.setHeader("User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+            req.setHeader("User-Agent", USER_AGENT);
             req.setHeader("Referer", "https://mp3juice.sc/");
             req.setHeader("Origin", "https://mp3juice.sc");
             req.setHeader("Accept", "*/*");
@@ -180,13 +187,33 @@ public class RadioAudioManager {
                 return false;
             }
 
-            InputStream in = new BufferedInputStream(httpResp.getEntity().getContent(), 16384);
-            Bitstream bitstream = new Bitstream(in);
+            mp3Data = EntityUtils.toByteArray(httpResp.getEntity());
+            LOG.info("[RadioMod] Downloaded {} bytes from {}", mp3Data.length, displayUrl);
+
+            if (mp3Data.length < 1000) {
+                LOG.error("[RadioMod] File too small ({} bytes), likely an error", mp3Data.length);
+                return false;
+            }
+
+        } catch (Exception e) {
+            LOG.error("[RadioMod] Download error: {}", e.getMessage());
+            return false;
+        } finally {
+            if (httpResp != null) try { httpResp.close(); } catch (Exception ignored) {}
+            if (httpClient != null) try { httpClient.close(); } catch (Exception ignored) {}
+        }
+
+        if (!src.running) return true; // stopped while downloading
+
+        // Step 2: Decode and play from memory
+        try {
+            ByteArrayInputStream bais = new ByteArrayInputStream(mp3Data);
+            Bitstream bitstream = new Bitstream(bais);
             Decoder decoder = new Decoder();
 
             Header hdr = bitstream.readFrame();
             if (hdr == null) {
-                LOG.warn("[RadioMod] No MP3 frames (not an MP3 stream)");
+                LOG.warn("[RadioMod] No MP3 frames found");
                 return false;
             }
 
@@ -205,31 +232,31 @@ public class RadioAudioManager {
 
             LOG.info("[RadioMod] Playing (JLayer) {}Hz {}ch — {}", sampleRate, channels, displayUrl);
 
+            // Write first decoded frame
             writeFrame(line, sb);
 
+            // Decode remaining frames
             while (src.running && !Thread.interrupted()) {
                 hdr = bitstream.readFrame();
-                if (hdr == null) {
-                    Thread.sleep(200);
-                    hdr = bitstream.readFrame();
-                    if (hdr == null) break;
-                }
+                if (hdr == null) break; // actual end of file
                 sb = (SampleBuffer) decoder.decodeFrame(hdr, bitstream);
                 writeFrame(line, sb);
                 bitstream.closeFrame();
             }
 
+            // Let the last audio drain out
+            if (src.running && src.line != null) {
+                try { src.line.drain(); } catch (Exception ignored) {}
+            }
+
             return true;
 
-        } catch (InterruptedException ignored) {
-            return true;
         } catch (Exception e) {
-            LOG.debug("[RadioMod] JLayer error: {}", e.getMessage());
+            if (e instanceof InterruptedException) return true;
+            LOG.error("[RadioMod] JLayer decode error: {}", e.getMessage());
             return false;
         } finally {
             cleanupLine(src);
-            if (httpResp != null) try { httpResp.close(); } catch (Exception ignored) {}
-            if (httpClient != null) try { httpClient.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -347,7 +374,6 @@ public class RadioAudioManager {
 
     private static void cleanupLine(RadioSource src) {
         if (src.line != null) {
-            try { src.line.drain(); } catch (Exception ignored) {}
             try { src.line.stop(); } catch (Exception ignored) {}
             try { src.line.close(); } catch (Exception ignored) {}
             src.line = null;
