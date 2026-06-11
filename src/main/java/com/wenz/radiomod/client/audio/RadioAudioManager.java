@@ -2,6 +2,11 @@ package com.wenz.radiomod.client.audio;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.util.math.BlockPos;
+import org.apache.http.client.config.RequestConfig;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -140,23 +145,42 @@ public class RadioAudioManager {
 
     /* ======== JLayer (MP3) path ======== */
 
+    private static final RequestConfig HTTP_CONFIG = RequestConfig.custom()
+            .setConnectTimeout(10000)
+            .setSocketTimeout(30000)
+            .setConnectionRequestTimeout(5000)
+            .build();
+
     private static boolean streamJLayer(RadioSource src, String url, String displayUrl) {
+        CloseableHttpClient httpClient = null;
+        CloseableHttpResponse httpResp = null;
         try {
-            HttpURLConnection conn = openConnection(url);
-            int code = conn.getResponseCode();
+            // Use Apache HttpClient — Java's HttpURLConnection strips Origin header
+            httpClient = HttpClients.createDefault();
+            HttpGet req = new HttpGet(url);
+            req.setConfig(HTTP_CONFIG);
+            req.setHeader("User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+            req.setHeader("Referer", "https://mp3juice.sc/");
+            req.setHeader("Origin", "https://mp3juice.sc");
+            req.setHeader("Accept", "*/*");
+
+            httpResp = httpClient.execute(req);
+            int code = httpResp.getStatusLine().getStatusCode();
             if (code / 100 != 2) {
                 LOG.error("[RadioMod] HTTP {} from {}", code, url);
                 return false;
             }
 
-            String ct = conn.getContentType();
-            if (ct != null && ct.contains("text/html")) {
+            org.apache.http.Header ctHeader = httpResp.getFirstHeader("Content-Type");
+            String ct = ctHeader != null ? ctHeader.getValue() : "";
+            if (ct.contains("text/html")) {
                 LOG.error("[RadioMod] Server returned HTML, not audio");
-                conn.disconnect();
                 return false;
             }
 
-            InputStream in = new BufferedInputStream(conn.getInputStream(), 16384);
+            InputStream in = new BufferedInputStream(httpResp.getEntity().getContent(), 16384);
             Bitstream bitstream = new Bitstream(in);
             Decoder decoder = new Decoder();
 
@@ -204,6 +228,8 @@ public class RadioAudioManager {
             return false;
         } finally {
             cleanupLine(src);
+            if (httpResp != null) try { httpResp.close(); } catch (Exception ignored) {}
+            if (httpClient != null) try { httpClient.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -307,21 +333,6 @@ public class RadioAudioManager {
     }
 
     /* ======== helpers ======== */
-
-    private static HttpURLConnection openConnection(String url) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
-        c.setRequestProperty("User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
-        c.setRequestProperty("Referer", "https://mp3juice.sc/");
-        c.setRequestProperty("Accept", "*/*");
-        c.setRequestProperty("Icy-MetaData", "0");
-        c.setConnectTimeout(10000);
-        c.setReadTimeout(30000);
-        c.setInstanceFollowRedirects(true);
-        c.connect();
-        return c;
-    }
 
     private static void writeFrame(SourceDataLine line, SampleBuffer sb) {
         short[] samples = sb.getBuffer();

@@ -54,6 +54,12 @@ public class StreamResolver {
             return new ResolveResult(url, nonMp3);
         }
 
+        // Step 1b: Mp3Juice download URLs — already direct MP3, skip probing!
+        if (url.contains("thetacloud.org/api/v1/download")) {
+            LOG.info("[RadioMod] Mp3Juice download URL — direct MP3, skipping probe");
+            return new ResolveResult(url, false);
+        }
+
         // Step 2: YouTube — use Mp3JuiceConverter (returns MP3, no ffmpeg!)
         if (isYouTube(url)) {
             LOG.info("[RadioMod] YouTube detected, converting to MP3...");
