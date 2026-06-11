@@ -17,6 +17,12 @@ import java.net.*;
 public class Mp3JuiceConverter {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
 
+    // Java's HttpURLConnection silently strips "Origin" from restricted headers.
+    // This must be enabled or the thetacloud init endpoint returns 403.
+    static {
+        System.setProperty("sun.net.http.allowRestrictedHeaders", "true");
+    }
+
     private static final String AUTH_URL = "https://theta.thetacloud.org/api/v1/auth";
     private static final String INIT_URL = "https://theta.thetacloud.org/api/v1/init";
     private static final String USER_AGENT =

@@ -14,6 +14,12 @@ import java.util.*;
  */
 public class Mp3JuiceSearch {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
+
+    // Java's HttpURLConnection silently strips "Origin" from restricted headers.
+    static {
+        System.setProperty("sun.net.http.allowRestrictedHeaders", "true");
+    }
+
     private static final String SEARCH_URL = "https://mp3juice.sc/api/v1/search";
     private static final String USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
