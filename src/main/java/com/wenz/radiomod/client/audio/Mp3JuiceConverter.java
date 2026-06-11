@@ -31,8 +31,8 @@ public class Mp3JuiceConverter {
     private static final String REFERER = "https://mp3juice.sc/";
     private static final String ORIGIN = "https://mp3juice.sc";
 
-    private static final int MAX_RETRIES = 2;
-    private static final int MAX_REDIRECTS = 3;
+    private static final int MAX_RETRIES = 3;
+    private static final int MAX_REDIRECTS = 5;
     private static final int PROGRESS_TIMEOUT = 45;
 
     private static final RequestConfig REQ_CONFIG = RequestConfig.custom()
@@ -56,6 +56,11 @@ public class Mp3JuiceConverter {
         for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
             if (attempt > 0) {
                 LOG.info("[RadioMod] Mp3Juice: retry #{} with new server...", attempt);
+                // Delay between retries: 1s, 2s, 3s
+                try { Thread.sleep(attempt * 1000L); } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
             }
 
             String result = tryConvert(videoId);
@@ -85,17 +90,28 @@ public class Mp3JuiceConverter {
                 lastError = "No auth key";
                 return null;
             }
+            LOG.info("[RadioMod] Mp3Juice: auth OK, key={}", key.substring(0, Math.min(6, key.length())) + "...");
 
             // Step 2: Init — gets a convert URL on a random server
             LOG.info("[RadioMod] Mp3Juice: initializing...");
             JsonObject initResp = doGet(client, INIT_URL + "?_=" + ts(), key);
             if (initResp == null) {
-                LOG.warn("[RadioMod] Mp3Juice: init request failed");
+                LOG.warn("[RadioMod] Mp3Juice: init request failed (doGet returned null, see above for details)");
                 lastError = "Init failed";
                 return null;
             }
+
+            // Check init error field
+            int initError = getInt(initResp, "error");
+            if (initError > 0) {
+                LOG.warn("[RadioMod] Mp3Juice: init returned error={}", initError);
+                lastError = "Init error " + initError;
+                return null;
+            }
+
             String convertUrl = getStr(initResp, "convertURL");
             if (convertUrl == null || convertUrl.isEmpty()) {
+                LOG.warn("[RadioMod] Mp3Juice: init response has no convertURL: {}", initResp.toString().substring(0, Math.min(200, initResp.toString().length())));
                 lastError = "No convert URL";
                 return null;
             }
@@ -136,6 +152,7 @@ public class Mp3JuiceConverter {
 
             int error = getInt(resp, "error");
             if (error > 0) {
+                LOG.warn("[RadioMod] Mp3Juice: convert error={}", error);
                 lastError = "Convert error " + error;
                 return null;
             }
@@ -144,9 +161,10 @@ public class Mp3JuiceConverter {
             if (getInt(resp, "redirect") == 1) {
                 String redirectUrl = getStr(resp, "redirectURL");
                 if (redirectUrl != null && !redirectUrl.isEmpty()) {
-                    LOG.info("[RadioMod] Mp3Juice: redirecting...");
+                    LOG.info("[RadioMod] Mp3Juice: redirecting (depth={})...", depth);
                     return doConvert(client, redirectUrl, videoId, key, depth + 1);
                 }
+                lastError = "Redirect with no URL";
                 return null;
             }
 
@@ -213,17 +231,21 @@ public class Mp3JuiceConverter {
 
             response = client.execute(req);
             int code = response.getStatusLine().getStatusCode();
+            String body = EntityUtils.toString(response.getEntity(), "UTF-8");
+
             if (code != 200) {
-                LOG.debug("[RadioMod] Mp3Juice: HTTP {} for {}", code,
-                        url.length() > 80 ? url.substring(0, 80) + "..." : url);
+                String shortUrl = url.length() > 80 ? url.substring(0, 80) + "..." : url;
+                String shortBody = body.length() > 200 ? body.substring(0, 200) + "..." : body;
+                LOG.warn("[RadioMod] Mp3Juice: HTTP {} for {} — body: {}", code, shortUrl, shortBody);
                 return null;
             }
 
-            String body = EntityUtils.toString(response.getEntity(), "UTF-8");
             return new JsonParser().parse(body).getAsJsonObject();
 
         } catch (Exception e) {
-            LOG.debug("[RadioMod] Mp3Juice: request error: {}", e.getMessage());
+            String shortUrl = url.length() > 80 ? url.substring(0, 80) + "..." : url;
+            LOG.warn("[RadioMod] Mp3Juice: request error for {}: {} ({})",
+                    shortUrl, e.getMessage(), e.getClass().getSimpleName());
             return null;
         } finally {
             closeQuietly(response);
