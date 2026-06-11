@@ -89,21 +89,50 @@ public class RadioAudioManager {
     private static void stream(RadioSource src, String rawUrl) {
         try {
             String url = StreamResolver.resolve(rawUrl);
+
+            if (url == null) {
+                LOG.error("[RadioMod] Could not resolve audio URL from: {}", rawUrl);
+                LOG.error("[RadioMod] Tip: use a direct MP3/stream link, or install yt-dlp for YouTube.");
+                return;
+            }
+
             LOG.info("[RadioMod] Connecting: {}", url);
 
             HttpURLConnection conn = openConnection(url);
-            if (conn.getResponseCode() / 100 != 2) {
-                LOG.error("[RadioMod] HTTP {}", conn.getResponseCode());
+            int code = conn.getResponseCode();
+            if (code / 100 != 2) {
+                LOG.error("[RadioMod] HTTP {} from {}", code, url);
+                return;
+            }
+
+            // Check content type to avoid decoding HTML as MP3
+            String ct = conn.getContentType();
+            if (ct != null && ct.contains("text/html")) {
+                LOG.error("[RadioMod] Server returned HTML, not audio! URL: {}", url);
+                LOG.error("[RadioMod] This is a web page, not a direct audio stream.");
+                conn.disconnect();
                 return;
             }
 
             InputStream in = new BufferedInputStream(conn.getInputStream(), 16384);
+
+            // Skip ID3v2 tag if present (some streams have it)
+            in.mark(10);
+            byte[] id3check = new byte[3];
+            int r = in.read(id3check);
+            in.reset();
+
             Bitstream bitstream = new Bitstream(in);
             Decoder decoder = new Decoder();
 
             // Read first frame to discover format
             Header hdr = bitstream.readFrame();
-            if (hdr == null) { LOG.warn("[RadioMod] No frames"); return; }
+            if (hdr == null) {
+                LOG.error("[RadioMod] No MP3 frames found in stream!");
+                LOG.error("[RadioMod] The URL may not point to an MP3 audio source.");
+                if (ct != null) LOG.error("[RadioMod] Content-Type was: {}", ct);
+                return;
+            }
 
             int sampleRate = hdr.frequency();
             int channels = (hdr.mode() == Header.SINGLE_CHANNEL) ? 1 : 2;
@@ -118,7 +147,7 @@ public class RadioAudioManager {
             line.start();
             src.line = line;
 
-            LOG.info("[RadioMod] Playing {}Hz {}ch", sampleRate, channels);
+            LOG.info("[RadioMod] Playing {}Hz {}ch — {}", sampleRate, channels, rawUrl);
 
             // Write first decoded frame
             writeFrame(line, sb);
@@ -138,7 +167,7 @@ public class RadioAudioManager {
 
         } catch (InterruptedException ignored) {
         } catch (Exception e) {
-            LOG.error("[RadioMod] Error: {}", e.getMessage());
+            LOG.error("[RadioMod] Playback error: {}", e.getMessage());
         } finally {
             if (src.line != null) {
                 try { src.line.drain(); } catch (Exception ignored) {}
