@@ -87,6 +87,7 @@ public class GuiRadio extends GuiContainer {
     private static final int BTN_STOP    = 2;
     private static final int BTN_MODE    = 5;
     private static final int BTN_SEARCH  = 6;
+    private static final int BTN_MUTE    = 7;
 
     public GuiRadio(ContainerRadio container) {
         super(container);
@@ -146,6 +147,11 @@ public class GuiRadio extends GuiContainer {
 
         String modeLabel = searchMode ? "\u266B URL" : "\u26A1 Search";
         buttonList.add(new GuiButton(BTN_MODE, x + 210, y + 30, 40, 18, modeLabel));
+
+        // Mute button — local only, doesn't affect other players
+        boolean muted = RadioAudioManager.isLocalMuted(container.getTile().getPos());
+        String muteLabel = muted ? "\uD83D\uDD0A" : "\uD83D\uDD07";
+        buttonList.add(new GuiButton(BTN_MUTE, x + 210, y + 82, 40, 14, muteLabel));
 
         if (searchMode) {
             buttonList.add(new GuiButton(BTN_SEARCH, x + 10, y + 56, 105, 20, "\u26A1 Search"));
@@ -231,6 +237,20 @@ public class GuiRadio extends GuiContainer {
                 PacketHandler.INSTANCE.sendToServer(
                         new PacketSetUrl(tile.getPos(), tile.getStreamUrl(), false, tile.getVolume()));
                 RadioAudioManager.stop(tile.getPos());
+                break;
+
+            case BTN_MUTE:
+                if (RadioAudioManager.isLocalMuted(tile.getPos())) {
+                    // Unmute — resume playback if radio is playing on server
+                    RadioAudioManager.unmuteLocal(tile.getPos());
+                    if (tile.isPlaying() && !tile.getStreamUrl().isEmpty()) {
+                        RadioAudioManager.play(tile.getPos(), tile.getStreamUrl(), tile.getVolume());
+                    }
+                } else {
+                    // Mute locally — stops audio but doesn't tell server
+                    RadioAudioManager.muteLocal(tile.getPos());
+                }
+                rebuildGui(null);
                 break;
         }
     }

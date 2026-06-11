@@ -4,6 +4,7 @@ import com.wenz.radiomod.block.TileRadio;
 import com.wenz.radiomod.client.audio.RadioAudioManager;
 import net.minecraft.util.math.BlockPos;
 import net.minecraftforge.common.MinecraftForge;
+import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
@@ -47,6 +48,14 @@ public class ClientProxy extends CommonProxy {
     public void onClientTick(TickEvent.ClientTickEvent event) {
         if (event.phase == TickEvent.Phase.END) {
             RadioAudioManager.tick();
+        }
+    }
+
+    /** Stop all audio when player leaves world (disconnect / quit to menu) */
+    @SubscribeEvent
+    public void onWorldUnload(WorldEvent.Unload event) {
+        if (event.getWorld().isRemote) {
+            RadioAudioManager.stopAll();
         }
     }
 }

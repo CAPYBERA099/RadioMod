@@ -30,6 +30,7 @@ import javazoom.jl.decoder.*;
 public class RadioAudioManager {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
     private static final Map<BlockPos, RadioSource> SOURCES = new ConcurrentHashMap<BlockPos, RadioSource>();
+    private static final Map<BlockPos, Boolean> LOCAL_MUTED = new ConcurrentHashMap<BlockPos, Boolean>();
     private static final float MAX_DISTANCE = 48f;
 
     /** VDS audio proxy base URL. Set to null/empty to disable proxy. */
@@ -57,6 +58,9 @@ public class RadioAudioManager {
     /* ======== public API ======== */
 
     public static void play(BlockPos pos, String url, float volume) {
+        // Don't play if locally muted
+        if (LOCAL_MUTED.containsKey(pos)) return;
+
         RadioSource existing = SOURCES.get(pos);
         if (existing != null && existing.running && url.equals(existing.currentUrl)) {
             existing.baseVolume = volume;
@@ -95,6 +99,7 @@ public class RadioAudioManager {
 
     public static void stopAll() {
         for (BlockPos p : SOURCES.keySet().toArray(new BlockPos[0])) stop(p);
+        LOCAL_MUTED.clear();
     }
 
     public static boolean isPlaying(BlockPos pos) {
@@ -110,6 +115,21 @@ public class RadioAudioManager {
     public static void setVolume(BlockPos pos, float vol) {
         RadioSource s = SOURCES.get(pos);
         if (s != null) s.baseVolume = Math.max(0, Math.min(1, vol));
+    }
+
+    /** Mute locally — stops audio without sending a packet to server */
+    public static void muteLocal(BlockPos pos) {
+        LOCAL_MUTED.put(pos, true);
+        stop(pos);
+    }
+
+    /** Unmute locally — will resume on next server sync or manual play */
+    public static void unmuteLocal(BlockPos pos) {
+        LOCAL_MUTED.remove(pos);
+    }
+
+    public static boolean isLocalMuted(BlockPos pos) {
+        return LOCAL_MUTED.containsKey(pos);
     }
 
     public static void tick() {
