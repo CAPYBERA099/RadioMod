@@ -15,13 +15,19 @@ import javazoom.jl.decoder.*;
 
 /**
  * Client-side audio engine for 1.12.2.
- * Streams MP3/Icecast audio, decodes via JLayer, plays through javax.sound
- * with distance-based volume.
+ * Supports two playback paths:
+ *   1. JLayer — for MP3 streams (internet radio, .mp3 files)
+ *   2. FFmpeg pipe — for any other format (YouTube AAC/Opus, OGG, FLAC, etc.)
+ *      Runs: ffmpeg -i URL -f s16le -ar 44100 -ac 2 pipe:1
+ *      Reads raw PCM from stdout → SourceDataLine
  */
 public class RadioAudioManager {
     private static final Logger LOG = LogManager.getLogger("RadioMod");
     private static final Map<BlockPos, RadioSource> SOURCES = new ConcurrentHashMap<BlockPos, RadioSource>();
     private static final float MAX_DISTANCE = 48f;
+
+    // FFmpeg availability (cached after first check)
+    private static Boolean ffmpegAvailable = null;
 
     /* ======== public API ======== */
 
@@ -50,6 +56,9 @@ public class RadioAudioManager {
         RadioSource src = SOURCES.remove(pos);
         if (src != null) {
             src.running = false;
+            if (src.ffmpegProcess != null) {
+                src.ffmpegProcess.destroyForcibly();
+            }
             if (src.thread != null) src.thread.interrupt();
         }
     }
@@ -87,51 +96,67 @@ public class RadioAudioManager {
     /* ======== streaming core ======== */
 
     private static void stream(RadioSource src, String rawUrl) {
-        try {
-            String url = StreamResolver.resolve(rawUrl);
+        // Resolve the URL
+        StreamResolver.ResolveResult resolved = StreamResolver.resolve(rawUrl);
 
-            if (url == null) {
-                LOG.error("[RadioMod] Could not resolve audio URL from: {}", rawUrl);
-                LOG.error("[RadioMod] Tip: use a direct MP3/stream link, or install yt-dlp for YouTube.");
-                return;
+        if (resolved == null) {
+            LOG.error("[RadioMod] Could not resolve: {}", rawUrl);
+            return;
+        }
+
+        LOG.info("[RadioMod] Resolved: {} (needsFfmpeg={})", resolved.url, resolved.needsFfmpeg);
+
+        if (resolved.needsFfmpeg) {
+            // Non-MP3 audio (YouTube AAC, Opus, etc.) — use ffmpeg pipe
+            if (isFfmpegAvailable()) {
+                streamFfmpeg(src, resolved.url, rawUrl);
+            } else {
+                // No ffmpeg — try JLayer anyway (might work for some formats)
+                LOG.warn("[RadioMod] ffmpeg not found, trying JLayer for non-MP3...");
+                if (!streamJLayer(src, resolved.url, rawUrl)) {
+                    LOG.error("[RadioMod] Playback failed. Install ffmpeg for YouTube/non-MP3 audio:");
+                    LOG.error("[RadioMod]   winget install ffmpeg");
+                    LOG.error("[RadioMod] After install, restart Minecraft.");
+                }
             }
+        } else {
+            // MP3 stream — use JLayer directly
+            if (!streamJLayer(src, resolved.url, rawUrl)) {
+                // JLayer failed — try ffmpeg as fallback
+                if (isFfmpegAvailable()) {
+                    LOG.info("[RadioMod] JLayer failed, trying ffmpeg...");
+                    streamFfmpeg(src, resolved.url, rawUrl);
+                }
+            }
+        }
+    }
 
-            LOG.info("[RadioMod] Connecting: {}", url);
+    /* ======== JLayer (MP3) path ======== */
 
+    private static boolean streamJLayer(RadioSource src, String url, String displayUrl) {
+        try {
             HttpURLConnection conn = openConnection(url);
             int code = conn.getResponseCode();
             if (code / 100 != 2) {
                 LOG.error("[RadioMod] HTTP {} from {}", code, url);
-                return;
+                return false;
             }
 
-            // Check content type to avoid decoding HTML as MP3
             String ct = conn.getContentType();
             if (ct != null && ct.contains("text/html")) {
-                LOG.error("[RadioMod] Server returned HTML, not audio! URL: {}", url);
-                LOG.error("[RadioMod] This is a web page, not a direct audio stream.");
+                LOG.error("[RadioMod] Server returned HTML, not audio");
                 conn.disconnect();
-                return;
+                return false;
             }
 
             InputStream in = new BufferedInputStream(conn.getInputStream(), 16384);
-
-            // Skip ID3v2 tag if present (some streams have it)
-            in.mark(10);
-            byte[] id3check = new byte[3];
-            int r = in.read(id3check);
-            in.reset();
-
             Bitstream bitstream = new Bitstream(in);
             Decoder decoder = new Decoder();
 
-            // Read first frame to discover format
             Header hdr = bitstream.readFrame();
             if (hdr == null) {
-                LOG.error("[RadioMod] No MP3 frames found in stream!");
-                LOG.error("[RadioMod] The URL may not point to an MP3 audio source.");
-                if (ct != null) LOG.error("[RadioMod] Content-Type was: {}", ct);
-                return;
+                LOG.warn("[RadioMod] No MP3 frames (not an MP3 stream)");
+                return false;
             }
 
             int sampleRate = hdr.frequency();
@@ -147,12 +172,10 @@ public class RadioAudioManager {
             line.start();
             src.line = line;
 
-            LOG.info("[RadioMod] Playing {}Hz {}ch — {}", sampleRate, channels, rawUrl);
+            LOG.info("[RadioMod] Playing (JLayer) {}Hz {}ch — {}", sampleRate, channels, displayUrl);
 
-            // Write first decoded frame
             writeFrame(line, sb);
 
-            // Main loop
             while (src.running && !Thread.interrupted()) {
                 hdr = bitstream.readFrame();
                 if (hdr == null) {
@@ -165,18 +188,125 @@ public class RadioAudioManager {
                 bitstream.closeFrame();
             }
 
+            return true;
+
         } catch (InterruptedException ignored) {
+            return true;
         } catch (Exception e) {
-            LOG.error("[RadioMod] Playback error: {}", e.getMessage());
+            LOG.debug("[RadioMod] JLayer error: {}", e.getMessage());
+            return false;
         } finally {
-            if (src.line != null) {
-                try { src.line.drain(); } catch (Exception ignored) {}
-                src.line.stop();
-                src.line.close();
-            }
-            src.running = false;
-            LOG.info("[RadioMod] Stopped");
+            cleanupLine(src);
         }
+    }
+
+    /* ======== FFmpeg pipe path ======== */
+
+    /**
+     * Plays any audio format by piping through ffmpeg.
+     * Command: ffmpeg -i <url> -f s16le -ar 44100 -ac 2 -loglevel error pipe:1
+     * Outputs raw 16-bit signed little-endian PCM at 44100 Hz stereo.
+     */
+    private static void streamFfmpeg(RadioSource src, String url, String displayUrl) {
+        Process proc = null;
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                "ffmpeg",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-i", url,
+                "-vn",                      // no video
+                "-f", "s16le",              // raw PCM output
+                "-acodec", "pcm_s16le",     // 16-bit signed LE
+                "-ar", "44100",             // 44.1 kHz
+                "-ac", "2",                 // stereo
+                "-loglevel", "error",
+                "pipe:1"                    // output to stdout
+            );
+            pb.redirectErrorStream(false);
+            proc = pb.start();
+            src.ffmpegProcess = proc;
+
+            // Read stderr in background for error logging
+            final Process fProc = proc;
+            Thread errThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        BufferedReader err = new BufferedReader(
+                            new InputStreamReader(fProc.getErrorStream()));
+                        String line;
+                        while ((line = err.readLine()) != null) {
+                            LOG.warn("[RadioMod] ffmpeg: {}", line);
+                        }
+                        err.close();
+                    } catch (Exception ignored) {}
+                }
+            }, "RadioMod-ffmpeg-err");
+            errThread.setDaemon(true);
+            errThread.start();
+
+            // Set up audio output: 44100 Hz, 16-bit, stereo, signed, little-endian
+            AudioFormat fmt = new AudioFormat(44100, 16, 2, true, false);
+            SourceDataLine line = (SourceDataLine) AudioSystem.getLine(
+                    new DataLine.Info(SourceDataLine.class, fmt));
+            line.open(fmt, 44100 * 2 * 2); // 1 second buffer
+            line.start();
+            src.line = line;
+
+            LOG.info("[RadioMod] Playing (ffmpeg) 44100Hz 2ch — {}", displayUrl);
+
+            // Read raw PCM from ffmpeg stdout and write to audio line
+            InputStream in = new BufferedInputStream(proc.getInputStream(), 16384);
+            byte[] buf = new byte[8192]; // ~46ms of audio at 44100Hz stereo 16-bit
+            int read;
+
+            while (src.running && (read = in.read(buf)) != -1) {
+                if (!src.running) break;
+                line.write(buf, 0, read);
+            }
+
+            in.close();
+
+        } catch (Exception e) {
+            LOG.error("[RadioMod] ffmpeg playback error: {}", e.getMessage());
+        } finally {
+            if (proc != null) {
+                proc.destroyForcibly();
+            }
+            src.ffmpegProcess = null;
+            cleanupLine(src);
+        }
+    }
+
+    /* ======== FFmpeg detection ======== */
+
+    private static boolean isFfmpegAvailable() {
+        if (ffmpegAvailable != null) return ffmpegAvailable;
+
+        try {
+            ProcessBuilder pb = new ProcessBuilder("ffmpeg", "-version");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            // Read output to prevent blocking
+            InputStream is = p.getInputStream();
+            byte[] buf = new byte[1024];
+            while (is.read(buf) != -1) {}
+            is.close();
+            int exit = p.waitFor();
+            ffmpegAvailable = (exit == 0);
+        } catch (Exception e) {
+            ffmpegAvailable = false;
+        }
+
+        if (ffmpegAvailable) {
+            LOG.info("[RadioMod] ffmpeg detected — all audio formats supported");
+        } else {
+            LOG.warn("[RadioMod] ffmpeg not found — only MP3 streams available");
+            LOG.warn("[RadioMod] Install ffmpeg for YouTube support: winget install ffmpeg");
+        }
+        return ffmpegAvailable;
     }
 
     /* ======== helpers ======== */
@@ -204,6 +334,16 @@ public class RadioAudioManager {
         line.write(bytes, 0, bytes.length);
     }
 
+    private static void cleanupLine(RadioSource src) {
+        if (src.line != null) {
+            try { src.line.drain(); } catch (Exception ignored) {}
+            try { src.line.stop(); } catch (Exception ignored) {}
+            try { src.line.close(); } catch (Exception ignored) {}
+            src.line = null;
+        }
+        src.running = false;
+    }
+
     private static float calcGain(double dist, float base) {
         if (dist >= MAX_DISTANCE) return 0f;
         if (dist <= 1.0) return base;
@@ -229,5 +369,6 @@ public class RadioAudioManager {
         volatile boolean running;
         Thread thread;
         SourceDataLine line;
+        Process ffmpegProcess;
     }
 }
